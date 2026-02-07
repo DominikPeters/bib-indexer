@@ -29,6 +29,7 @@ export class SearchIndexManager {
   private entries: IndexedEntry[] = [];
   private entryIdMap: Map<string, number> = new Map(); // file:key -> id
   private doiMap: Map<string, number[]> = new Map(); // doi -> entry indices
+  private nextId: number = 0;
 
   constructor() {
     this.index = this.createIndex();
@@ -56,37 +57,81 @@ export class SearchIndexManager {
     this.entries = entries;
     this.entryIdMap.clear();
     this.doiMap.clear();
+    this.nextId = 0;
 
-    // Add all entries with numeric IDs
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i];
-      const year = entry.fields.year ?? '';
-      const journal = (entry.fields.journal ?? '').toLowerCase();
-      const booktitle = (entry.fields.booktitle ?? '').toLowerCase();
-      // Combined searchable text for cross-field AND matching
-      const searchText = [
-        entry.titleFilter,
-        entry.authorNorm,
-        entry.key.toLowerCase(),
-        year,
-        journal,
-        booktitle,
-      ].join(' ');
+    for (const entry of entries) {
+      this.addSingleEntry(entry);
+    }
+  }
 
-      const searchableEntry: SearchableEntry = {
-        ...entry,
-        id: i,
-        searchText,
-      };
-      this.index.add(searchableEntry);
-      this.entryIdMap.set(`${entry.file}:${entry.key}`, i);
-
-      // Build DOI lookup map
-      if (entry.doi) {
-        const existing = this.doiMap.get(entry.doi) ?? [];
-        existing.push(i);
-        this.doiMap.set(entry.doi, existing);
+  /**
+   * Remove all entries for a given file from the search index
+   */
+  removeFile(filePath: string): void {
+    const idsToRemove: number[] = [];
+    for (const [mapKey, id] of this.entryIdMap) {
+      if (mapKey.startsWith(filePath + ':')) {
+        idsToRemove.push(id);
+        this.entryIdMap.delete(mapKey);
       }
+    }
+
+    for (const id of idsToRemove) {
+      this.index.remove(id);
+      // Remove from entries array
+      const entry = this.entries[id];
+      if (entry?.doi) {
+        const doiEntries = this.doiMap.get(entry.doi);
+        if (doiEntries) {
+          const filtered = doiEntries.filter(i => i !== id);
+          if (filtered.length > 0) {
+            this.doiMap.set(entry.doi, filtered);
+          } else {
+            this.doiMap.delete(entry.doi);
+          }
+        }
+      }
+      // Mark as removed (keep array sparse to preserve other IDs)
+      (this.entries as any)[id] = undefined;
+    }
+  }
+
+  /**
+   * Add new entries incrementally (e.g., after indexing a single file)
+   */
+  addEntries(entries: IndexedEntry[]): void {
+    for (const entry of entries) {
+      this.addSingleEntry(entry);
+    }
+  }
+
+  private addSingleEntry(entry: IndexedEntry): void {
+    const id = this.nextId++;
+    const year = entry.fields.year ?? '';
+    const journal = (entry.fields.journal ?? '').toLowerCase();
+    const booktitle = (entry.fields.booktitle ?? '').toLowerCase();
+    const searchText = [
+      entry.titleFilter,
+      entry.authorNorm,
+      entry.key.toLowerCase(),
+      year,
+      journal,
+      booktitle,
+    ].join(' ');
+
+    const searchableEntry: SearchableEntry = {
+      ...entry,
+      id,
+      searchText,
+    };
+    this.index.add(searchableEntry);
+    this.entries[id] = entry;
+    this.entryIdMap.set(`${entry.file}:${entry.key}`, id);
+
+    if (entry.doi) {
+      const existing = this.doiMap.get(entry.doi) ?? [];
+      existing.push(id);
+      this.doiMap.set(entry.doi, existing);
     }
   }
 
@@ -117,7 +162,7 @@ export class SearchIndexManager {
         for (const item of fieldResult.result) {
           const searchItem = item as unknown as SearchResult;
           const id = typeof searchItem === 'number' ? searchItem : searchItem.id;
-          if (!seenIds.has(id) && id < this.entries.length) {
+          if (!seenIds.has(id) && this.entries[id]) {
             seenIds.add(id);
             matchedEntries.push(this.entries[id]);
           }
@@ -165,7 +210,7 @@ export class SearchIndexManager {
           const searchItem = item as unknown as SearchResult;
           const id = typeof searchItem === 'number' ? searchItem : searchItem.id;
           // Skip the entry itself and any we've already seen
-          if (id !== currentId && !seenIds.has(id) && id < this.entries.length) {
+          if (id !== currentId && !seenIds.has(id) && this.entries[id]) {
             seenIds.add(id);
             candidates.push(this.entries[id]);
           }

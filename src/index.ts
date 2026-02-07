@@ -5,6 +5,8 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as fsPromises from 'fs/promises';
+// Note: fs sync is still used for initialize() (reading cached index at startup)
+// and saveIndex() where sync write is needed for reliability
 import * as path from 'path';
 import { BibIndex, IndexedEntry, IndexedFile } from './types';
 import { parseBibFile } from './parser';
@@ -23,6 +25,7 @@ export class BibIndexManager {
   private outputChannel: vscode.OutputChannel;
   private onDidUpdateEmitter = new vscode.EventEmitter<void>();
   private searchIndex: SearchIndexManager;
+  private entriesByFile: Map<string, IndexedEntry[]> = new Map();
 
   /** Event fired when background validation completes and index is updated */
   public readonly onDidUpdate = this.onDidUpdateEmitter.event;
@@ -101,9 +104,9 @@ export class BibIndexManager {
   private async runBackgroundValidation(fullReindex: boolean): Promise<void> {
     try {
       if (fullReindex) {
-        await this.reindexAllAsync();
+        await this.reindexAll();
       } else {
-        await this.validateAndUpdateAsync();
+        await this.validateAndUpdate();
       }
       this.onDidUpdateEmitter.fire();
     } catch (error) {
@@ -123,6 +126,7 @@ export class BibIndexManager {
   }
 
   private normalizeLoadedEntries(entries: IndexedEntry[]): void {
+    this.entriesByFile.clear();
     for (const entry of entries) {
       if (!entry.fields) {
         entry.fields = {};
@@ -130,6 +134,9 @@ export class BibIndexManager {
       if (!entry.creators) {
         entry.creators = {};
       }
+      const existing = this.entriesByFile.get(entry.file) ?? [];
+      existing.push(entry);
+      this.entriesByFile.set(entry.file, existing);
     }
   }
 
@@ -139,7 +146,9 @@ export class BibIndexManager {
   async addFolder(folderPath: string): Promise<void> {
     const resolvedPath = path.resolve(folderPath);
 
-    if (!fs.existsSync(resolvedPath)) {
+    try {
+      await fsPromises.access(resolvedPath);
+    } catch {
       vscode.window.showErrorMessage(`Folder does not exist: ${resolvedPath}`);
       return;
     }
@@ -154,7 +163,6 @@ export class BibIndexManager {
 
     // Scan the new folder
     await this.scanFolder(resolvedPath);
-    this.searchIndex.rebuild(this.index.entries);
     this.saveIndex();
 
     vscode.window.showInformationMessage(`Added folder to index: ${resolvedPath}`);
@@ -183,7 +191,6 @@ export class BibIndexManager {
       }
     }
 
-    this.searchIndex.rebuild(this.index.entries);
     this.saveIndex();
     vscode.window.showInformationMessage(`Removed folder from index: ${resolvedPath}`);
   }
@@ -194,7 +201,9 @@ export class BibIndexManager {
   async addFile(filePath: string): Promise<void> {
     const resolvedPath = path.resolve(filePath);
 
-    if (!fs.existsSync(resolvedPath)) {
+    try {
+      await fsPromises.access(resolvedPath);
+    } catch {
       vscode.window.showErrorMessage(`File does not exist: ${resolvedPath}`);
       return;
     }
@@ -223,7 +232,6 @@ export class BibIndexManager {
     }
 
     await this.indexFile(resolvedPath);
-    this.searchIndex.rebuild(this.index.entries);
     this.saveIndex();
 
     vscode.window.showInformationMessage(`Added file to index: ${path.basename(resolvedPath)}`);
@@ -253,7 +261,6 @@ export class BibIndexManager {
     }
 
     this.removeFileFromIndex(resolvedPath);
-    this.searchIndex.rebuild(this.index.entries);
     this.saveIndex();
   }
 
@@ -320,23 +327,49 @@ export class BibIndexManager {
   }
 
   /**
-   * Reindex all files (sync version for user-triggered actions with progress)
+   * Reindex all files
+   * @param onProgress Optional callback for progress reporting
    */
-  async reindexAll(): Promise<void> {
+  async reindexAll(onProgress?: (indexed: number, total: number) => void): Promise<void> {
     this.log('Starting full reindex...');
     this.index.entries = [];
     this.index.files = {};
+    this.entriesByFile.clear();
 
-    // Scan folders
+    // Discover all files first to know total count
+    const allFiles: { filePath: string; fromFolder: boolean }[] = [];
+
     for (const folder of this.index.folders) {
-      await this.scanFolder(folder);
+      try {
+        await fsPromises.access(folder);
+        const bibFiles = await this.findBibFiles(folder);
+        for (const filePath of bibFiles) {
+          if (!this.index.excludedFiles.includes(filePath)) {
+            allFiles.push({ filePath, fromFolder: true });
+          }
+        }
+      } catch {
+        // Folder doesn't exist
+      }
     }
 
-    // Index individual files
     for (const filePath of this.index.individualFiles) {
-      if (fs.existsSync(filePath) && !this.index.files[filePath]) {
-        await this.indexFile(filePath);
+      try {
+        await fsPromises.access(filePath);
+        if (!allFiles.some(f => f.filePath === filePath)) {
+          allFiles.push({ filePath, fromFolder: false });
+        }
+      } catch {
+        // File doesn't exist
       }
+    }
+
+    this.log(`Found ${allFiles.length} .bib files to index`);
+
+    // Index all files
+    for (let i = 0; i < allFiles.length; i++) {
+      await this.indexFile(allFiles[i].filePath);
+      onProgress?.(i + 1, allFiles.length);
     }
 
     this.searchIndex.rebuild(this.index.entries);
@@ -345,43 +378,13 @@ export class BibIndexManager {
   }
 
   /**
-   * Reindex all files (async version for background operations)
+   * Check for changed files and update the index
    */
-  private async reindexAllAsync(): Promise<void> {
-    this.log('Starting background full reindex...');
-    this.index.entries = [];
-    this.index.files = {};
-
-    // Scan folders
-    for (const folder of this.index.folders) {
-      await this.scanFolderAsync(folder);
-    }
-
-    // Index individual files
-    for (const filePath of this.index.individualFiles) {
-      if (!this.index.files[filePath]) {
-        try {
-          await fsPromises.access(filePath);
-          await this.indexFileAsync(filePath);
-        } catch {
-          // File doesn't exist
-        }
-      }
-    }
-
-    this.searchIndex.rebuild(this.index.entries);
-    this.saveIndex();
-    this.log(`Background reindex complete: ${this.index.entries.length} entries from ${Object.keys(this.index.files).length} files`);
-  }
-
-  /**
-   * Check for changed files and update the index (async, non-blocking)
-   */
-  private async validateAndUpdateAsync(): Promise<void> {
+  private async validateAndUpdate(): Promise<void> {
     const filesToReindex: string[] = [];
     const filesToRemove: string[] = [];
 
-    // Check existing indexed files using async operations
+    // Check existing indexed files
     for (const [filePath, fileInfo] of Object.entries(this.index.files)) {
       try {
         const stat = await fsPromises.stat(filePath);
@@ -389,7 +392,6 @@ export class BibIndexManager {
           filesToReindex.push(filePath);
         }
       } catch {
-        // File doesn't exist or can't be accessed
         filesToRemove.push(filePath);
       }
     }
@@ -401,12 +403,12 @@ export class BibIndexManager {
 
     // Reindex changed files
     for (const filePath of filesToReindex) {
-      await this.indexFileAsync(filePath);
+      await this.indexFile(filePath);
     }
 
     // Scan folders for new files (respects exclusions)
     for (const folder of this.index.folders) {
-      await this.scanFolderAsync(folder, true);
+      await this.scanFolder(folder, true);
     }
 
     // Check individual files
@@ -414,7 +416,7 @@ export class BibIndexManager {
       if (!this.index.files[filePath]) {
         try {
           await fsPromises.access(filePath);
-          await this.indexFileAsync(filePath);
+          await this.indexFile(filePath);
         } catch {
           // File doesn't exist
         }
@@ -422,29 +424,28 @@ export class BibIndexManager {
     }
 
     if (filesToRemove.length > 0 || filesToReindex.length > 0) {
-      this.searchIndex.rebuild(this.index.entries);
       this.saveIndex();
       this.log(`Updated index: removed ${filesToRemove.length} files, reindexed ${filesToReindex.length} files`);
     }
   }
 
   /**
-   * Scan a folder recursively for .bib files (sync version)
+   * Scan a folder recursively for .bib files
    */
   private async scanFolder(folderPath: string, skipExisting = false): Promise<void> {
-    if (!fs.existsSync(folderPath)) {
+    try {
+      await fsPromises.access(folderPath);
+    } catch {
       return;
     }
 
-    const bibFiles = this.findBibFiles(folderPath);
+    const bibFiles = await this.findBibFiles(folderPath);
     this.log(`Found ${bibFiles.length} .bib files in ${folderPath}`);
 
     for (const filePath of bibFiles) {
-      // Skip excluded files
       if (this.index.excludedFiles.includes(filePath)) {
         continue;
       }
-
       if (skipExisting && this.index.files[filePath]) {
         continue;
       }
@@ -453,66 +454,9 @@ export class BibIndexManager {
   }
 
   /**
-   * Scan a folder recursively for .bib files (async version)
+   * Find all .bib files in a directory recursively
    */
-  private async scanFolderAsync(folderPath: string, skipExisting = false): Promise<void> {
-    try {
-      await fsPromises.access(folderPath);
-    } catch {
-      return;
-    }
-
-    const bibFiles = await this.findBibFilesAsync(folderPath);
-    this.log(`Found ${bibFiles.length} .bib files in ${folderPath}`);
-
-    for (const filePath of bibFiles) {
-      // Skip excluded files
-      if (this.index.excludedFiles.includes(filePath)) {
-        continue;
-      }
-
-      if (skipExisting && this.index.files[filePath]) {
-        continue;
-      }
-      await this.indexFileAsync(filePath);
-    }
-  }
-
-  /**
-   * Find all .bib files in a directory recursively (sync version)
-   */
-  private findBibFiles(dir: string): string[] {
-    const files: string[] = [];
-
-    const scanDir = (currentDir: string) => {
-      try {
-        const entries = fs.readdirSync(currentDir, { withFileTypes: true });
-
-        for (const entry of entries) {
-          const fullPath = path.join(currentDir, entry.name);
-
-          if (entry.isDirectory()) {
-            // Skip hidden directories and common non-source directories
-            if (!entry.name.startsWith('.') && entry.name !== 'node_modules') {
-              scanDir(fullPath);
-            }
-          } else if (entry.isFile() && entry.name.endsWith('.bib')) {
-            files.push(fullPath);
-          }
-        }
-      } catch (error) {
-        this.log(`Error scanning directory ${currentDir}: ${error}`);
-      }
-    };
-
-    scanDir(dir);
-    return files;
-  }
-
-  /**
-   * Find all .bib files in a directory recursively (async version)
-   */
-  private async findBibFilesAsync(dir: string): Promise<string[]> {
+  private async findBibFiles(dir: string): Promise<string[]> {
     const files: string[] = [];
 
     const scanDir = async (currentDir: string) => {
@@ -523,7 +467,6 @@ export class BibIndexManager {
           const fullPath = path.join(currentDir, entry.name);
 
           if (entry.isDirectory()) {
-            // Skip hidden directories and common non-source directories
             if (!entry.name.startsWith('.') && entry.name !== 'node_modules') {
               await scanDir(fullPath);
             }
@@ -541,41 +484,9 @@ export class BibIndexManager {
   }
 
   /**
-   * Index a single file (sync version for user-triggered actions)
+   * Index a single file
    */
   private async indexFile(filePath: string): Promise<void> {
-    try {
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const stat = fs.statSync(filePath);
-
-      // Remove old entries from this file
-      this.removeFileFromIndex(filePath);
-
-      // Parse and add new entries
-      const { entries, errors } = parseBibFile(content, filePath);
-
-      this.index.entries.push(...entries);
-      this.index.files[filePath] = {
-        path: filePath,
-        mtime: stat.mtimeMs,
-        entryCount: entries.length,
-        parseErrors: errors.length > 0 ? errors : undefined,
-      };
-
-      if (errors.length > 0) {
-        this.log(`Indexed ${entries.length} entries from ${path.basename(filePath)} (${errors.length} errors)`);
-      } else {
-        this.log(`Indexed ${entries.length} entries from ${path.basename(filePath)}`);
-      }
-    } catch (error) {
-      this.log(`Failed to index ${filePath}: ${error}`);
-    }
-  }
-
-  /**
-   * Index a single file (async version for background operations)
-   */
-  private async indexFileAsync(filePath: string): Promise<void> {
     try {
       const [content, stat] = await Promise.all([
         fsPromises.readFile(filePath, 'utf-8'),
@@ -588,7 +499,9 @@ export class BibIndexManager {
       // Parse and add new entries
       const { entries, errors } = parseBibFile(content, filePath);
 
+      this.entriesByFile.set(filePath, entries);
       this.index.entries.push(...entries);
+      this.searchIndex.addEntries(entries);
       this.index.files[filePath] = {
         path: filePath,
         mtime: stat.mtimeMs,
@@ -610,8 +523,90 @@ export class BibIndexManager {
    * Remove all entries for a file from the index
    */
   private removeFileFromIndex(filePath: string): void {
-    this.index.entries = this.index.entries.filter(e => e.file !== filePath);
+    this.searchIndex.removeFile(filePath);
+    this.entriesByFile.delete(filePath);
+    this.rebuildEntriesFromMap();
     delete this.index.files[filePath];
+  }
+
+  private rebuildEntriesFromMap(): void {
+    this.index.entries = [];
+    for (const entries of this.entriesByFile.values()) {
+      this.index.entries.push(...entries);
+    }
+  }
+
+  /**
+   * Start watching for .bib file changes in watched folders
+   * Returns a disposable to stop watching
+   */
+  startWatching(): vscode.Disposable {
+    const watcher = vscode.workspace.createFileSystemWatcher('**/*.bib');
+    let debounceTimer: NodeJS.Timeout | undefined;
+
+    const handleChange = (uri: vscode.Uri) => {
+      const filePath = uri.fsPath;
+      // Only handle files that are in watched folders or individually tracked
+      if (!this.isInWatchedFolder(filePath) && !this.index.individualFiles.includes(filePath)) {
+        return;
+      }
+      if (this.index.excludedFiles.includes(filePath)) {
+        return;
+      }
+
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+      }
+      debounceTimer = setTimeout(async () => {
+        this.log(`File changed: ${path.basename(filePath)}`);
+        await this.indexFile(filePath);
+        this.saveIndex();
+        this.onDidUpdateEmitter.fire();
+      }, 500);
+    };
+
+    const handleCreate = (uri: vscode.Uri) => {
+      const filePath = uri.fsPath;
+      if (!this.isInWatchedFolder(filePath) || this.index.excludedFiles.includes(filePath)) {
+        return;
+      }
+      if (this.index.files[filePath]) {
+        return; // Already indexed
+      }
+
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+      }
+      debounceTimer = setTimeout(async () => {
+        this.log(`File created: ${path.basename(filePath)}`);
+        await this.indexFile(filePath);
+        this.saveIndex();
+        this.onDidUpdateEmitter.fire();
+      }, 500);
+    };
+
+    const handleDelete = (uri: vscode.Uri) => {
+      const filePath = uri.fsPath;
+      if (!this.index.files[filePath]) {
+        return;
+      }
+
+      this.log(`File deleted: ${path.basename(filePath)}`);
+      this.removeFileFromIndex(filePath);
+      this.saveIndex();
+      this.onDidUpdateEmitter.fire();
+    };
+
+    watcher.onDidChange(handleChange);
+    watcher.onDidCreate(handleCreate);
+    watcher.onDidDelete(handleDelete);
+
+    return new vscode.Disposable(() => {
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+      }
+      watcher.dispose();
+    });
   }
 
   /**

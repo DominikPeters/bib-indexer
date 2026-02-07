@@ -259,41 +259,6 @@ export function normalizeForCluster(title: string): string {
 }
 
 /**
- * Normalize author string for matching
- * - Extract last names only
- * - Sort alphabetically
- * - Ignore initials vs full first names
- */
-export function normalizeAuthor(author: string): string {
-  if (!author) {return '';}
-
-  // Split on " and " (BibTeX convention)
-  const authors = author.split(/\s+and\s+/i);
-
-  const lastNames = authors.map(a => {
-    // Handle "Last, First" format
-    if (a.includes(',')) {
-      const lastName = a.split(',')[0].trim();
-      return extractPlainName(lastName);
-    }
-
-    // Handle "First Last" format - take last word
-    const parts = a.trim().split(/\s+/);
-    if (parts.length > 0) {
-      return extractPlainName(parts[parts.length - 1]);
-    }
-
-    return '';
-  });
-
-  return lastNames
-    .filter(n => n.length > 0)
-    .map(n => n.toLowerCase())
-    .sort()
-    .join(' ');
-}
-
-/**
  * Extract plain name from potentially braced/accented text
  */
 function extractPlainName(name: string): string {

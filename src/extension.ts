@@ -82,7 +82,9 @@ export async function activate(context: vscode.ExtensionContext) {
           cancellable: false,
         },
         async () => {
-          await indexManager.reindexAll();
+          await indexManager.reindexAll((indexed, total) => {
+            sidebarProvider.sendProgress('Indexing...', indexed, total);
+          });
           sidebarProvider.refresh();
         }
       );
@@ -90,12 +92,8 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  context.subscriptions.push(
-    vscode.commands.registerCommand('tooManyBibs.openMergePanel', () => {
-      // TODO: Could open a full editor panel for complex merges
-      vscode.window.showInformationMessage('Use the sidebar to merge fields');
-    })
-  );
+  // Start file system watcher for .bib files
+  context.subscriptions.push(indexManager.startWatching());
 
   // Listen for cursor position changes
   context.subscriptions.push(

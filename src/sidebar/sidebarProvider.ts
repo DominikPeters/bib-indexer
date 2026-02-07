@@ -10,12 +10,14 @@ import { findMatches, compareFields, FieldComparison } from '../matching';
 import { normalizeForFilter, parseBibFile } from '../parser';
 import { CANONICAL_FIELD_ORDER } from '../types';
 import { findEntryInsertionPoint, formatBibtex, determineBlankLines } from '../insertion';
+import { computeDiff } from '../diff';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
   private currentEntry: IndexedEntry | null = null;
   private currentEditor: vscode.TextEditor | null = null;
   private documentChangeTimeout: NodeJS.Timeout | null = null;
+  private parsedDocumentCache: Map<string, { version: number; entries: IndexedEntry[] }> = new Map();
 
   constructor(
     private extensionUri: vscode.Uri,
@@ -28,6 +30,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     _token: vscode.CancellationToken
   ): void {
     this._view = webviewView;
+
+    webviewView.onDidDispose(() => {
+      if (this.documentChangeTimeout) {
+        clearTimeout(this.documentChangeTimeout);
+        this.documentChangeTimeout = null;
+      }
+      this._view = undefined;
+    });
 
     webviewView.webview.options = {
       enableScripts: true,
@@ -134,6 +144,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this.updateMatches();
   }
 
+  sendProgress(phase: string, current: number, total: number): void {
+    if (!this._view) return;
+    this._view.webview.postMessage({
+      command: 'indexProgress',
+      phase,
+      current,
+      total,
+    });
+  }
+
   clearCurrentEntry(): void {
     this.currentEntry = null;
     this.currentEditor = null;
@@ -146,8 +166,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const position = editor.selection.active;
 
     try {
-      const content = document.getText();
-      const { entries } = parseBibFile(content, document.uri.fsPath);
+      const uri = document.uri.toString();
+      const cached = this.parsedDocumentCache.get(uri);
+      let entries: IndexedEntry[];
+
+      if (cached && cached.version === document.version) {
+        entries = cached.entries;
+      } else {
+        const content = document.getText();
+        const result = parseBibFile(content, document.uri.fsPath);
+        entries = result.entries;
+        this.parsedDocumentCache.set(uri, { version: document.version, entries });
+      }
 
       const lineNum = position.line + 1;
       const entry = entries.find(e => lineNum >= e.startLine && lineNum <= e.endLine);
@@ -398,7 +428,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     for (const result of results) {
       // Group by title, author, and field content
       const fieldHash = this.computeFieldHash(result.entry.fields);
-      const key = `${result.entry.titleFilter}|${result.entry.authorNorm}|${fieldHash}`;
+      const key = `${result.entry.titleFilter}\x00${result.entry.authorNorm}\x00${fieldHash}`;
       const existing = grouped.get(key) ?? [];
       existing.push(result);
       grouped.set(key, existing);
@@ -552,7 +582,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     for (const match of matches) {
       // Group by title, author, AND field values so entries with different content are shown separately
       const fieldHash = this.computeFieldHash(match.fields);
-      const key = `${match.titleFilter}|${match.authorNorm}|${fieldHash}`;
+      const key = `${match.titleFilter}\x00${match.authorNorm}\x00${fieldHash}`;
       const existing = grouped.get(key) ?? [];
       existing.push(match);
       grouped.set(key, existing);
@@ -577,9 +607,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
   private computeFieldHash(fields: Record<string, string>): string {
     // Create a simple hash from sorted field names and values
+    // Use \x00 as delimiter to avoid collisions with field content
     const sortedKeys = Object.keys(fields).sort();
-    const parts = sortedKeys.map(k => `${k}=${fields[k]}`);
-    return parts.join('|');
+    const parts = sortedKeys.map(k => `${k}\x00${fields[k]}`);
+    return parts.join('\x00');
   }
 
   private formatEntryForDisplay(
@@ -657,72 +688,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   }
 
   private computeInlineDiff(yours: string, theirs: string): string {
-    // Fine-grained character-level diff using LCS
-    // This highlights individual changed characters rather than entire ranges
-    const diff = this.computeCharDiff(yours, theirs);
+    const diff = computeDiff(yours, theirs);
     let result = '';
 
     for (const part of diff) {
       if (part.type === 'same') {
         result += this.escapeHtml(part.text);
       } else if (part.type === 'add') {
-        // Text in 'theirs' but not in 'yours' - highlight as addition
         result += `<mark>${this.escapeHtml(part.text)}</mark>`;
       }
-      // 'remove' parts are from 'yours' only, so we don't show them in 'theirs' display
     }
 
     return result;
-  }
-
-  private computeCharDiff(a: string, b: string): { type: 'same' | 'add' | 'remove'; text: string }[] {
-    // Compute LCS (Longest Common Subsequence) using dynamic programming
-    const m = a.length;
-    const n = b.length;
-
-    // Build LCS table
-    const dp: number[][] = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
-
-    for (let i = 1; i <= m; i++) {
-      for (let j = 1; j <= n; j++) {
-        if (a[i - 1] === b[j - 1]) {
-          dp[i][j] = dp[i - 1][j - 1] + 1;
-        } else {
-          dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-        }
-      }
-    }
-
-    // Backtrack to build the diff
-    const diff: { type: 'same' | 'add' | 'remove'; text: string }[] = [];
-    let i = m;
-    let j = n;
-
-    while (i > 0 || j > 0) {
-      if (i > 0 && j > 0 && a[i - 1] === b[j - 1]) {
-        diff.unshift({ type: 'same', text: a[i - 1] });
-        i--;
-        j--;
-      } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-        diff.unshift({ type: 'add', text: b[j - 1] });
-        j--;
-      } else {
-        diff.unshift({ type: 'remove', text: a[i - 1] });
-        i--;
-      }
-    }
-
-    // Consolidate consecutive parts of the same type
-    const consolidated: { type: 'same' | 'add' | 'remove'; text: string }[] = [];
-    for (const part of diff) {
-      if (consolidated.length > 0 && consolidated[consolidated.length - 1].type === part.type) {
-        consolidated[consolidated.length - 1].text += part.text;
-      } else {
-        consolidated.push({ ...part });
-      }
-    }
-
-    return consolidated;
   }
 
   private escapeHtml(text: string): string {
@@ -903,6 +880,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
     * { box-sizing: border-box; }
@@ -989,6 +967,31 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     .status-bar a:hover { text-decoration: underline; }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border: 2px solid var(--vscode-descriptionForeground);
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+
+    .progress-text {
+      display: none;
+      align-items: center;
+    }
+
+    .progress-text.active {
+      display: inline-flex;
+    }
 
     .entry-card {
       border: 1px solid var(--vscode-panel-border);
@@ -1469,6 +1472,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     </div>
     <div class="status-bar">
       <span id="statusText">Initializing...</span>
+      <span class="progress-text" id="progressText"><span class="spinner"></span><span id="progressLabel"></span></span>
       <a id="manageFiles">Manage files</a>
     </div>
   </div>
@@ -1506,6 +1510,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const modalClose = document.getElementById('modalClose');
     const modalBody = document.getElementById('modalBody');
     const modalTitle = document.getElementById('modalTitle');
+    const progressText = document.getElementById('progressText');
+    const progressLabel = document.getElementById('progressLabel');
 
     let currentEntry = null;
     let isSearching = false;
@@ -1592,6 +1598,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         case 'filesModalData':
           renderFilesModal(message.entries);
+          break;
+
+        case 'indexProgress':
+          if (message.current < message.total) {
+            progressText.classList.add('active');
+            progressLabel.textContent = message.phase + ' ' + message.current + '/' + message.total;
+          } else {
+            progressText.classList.remove('active');
+          }
           break;
       }
     });

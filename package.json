@@ -27,10 +27,6 @@
       {
         "command": "tooManyBibs.reindex",
         "title": "Too Many Bibs: Reindex All Files"
-      },
-      {
-        "command": "tooManyBibs.openMergePanel",
-        "title": "Too Many Bibs: Open Merge Panel for Current Entry"
       }
     ],
     "viewsContainers": {

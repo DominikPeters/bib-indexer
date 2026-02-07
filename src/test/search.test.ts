@@ -409,4 +409,266 @@ suite('Search Test Suite', () => {
       assert.strictEqual(results[0].key, 'new');
     });
   });
+
+  suite('removeFile', () => {
+    test('should remove entries for a specific file', () => {
+      const searchIndex = new SearchIndexManager();
+      searchIndex.rebuild([
+        createEntry({
+          key: 'entry1',
+          file: '/test/file1.bib',
+          titleFilter: 'social choice theory',
+          authorNorm: 'arrow',
+        }),
+        createEntry({
+          key: 'entry2',
+          file: '/test/file2.bib',
+          titleFilter: 'game theory introduction',
+          authorNorm: 'nash',
+        }),
+      ]);
+
+      searchIndex.removeFile('/test/file1.bib');
+
+      const results1 = searchIndex.search('social choice');
+      assert.strictEqual(results1.length, 0);
+
+      const results2 = searchIndex.search('game theory');
+      assert.strictEqual(results2.length, 1);
+      assert.strictEqual(results2[0].key, 'entry2');
+    });
+
+    test('should remove DOI mappings for removed file', () => {
+      const searchIndex = new SearchIndexManager();
+      const entry1 = createEntry({
+        key: 'entry1',
+        file: '/test/file1.bib',
+        titleFilter: 'social choice theory',
+        doi: '10.1234/test',
+      });
+      const entry2 = createEntry({
+        key: 'entry2',
+        file: '/test/file2.bib',
+        titleFilter: 'game theory',
+        doi: '10.1234/test', // same DOI
+      });
+      searchIndex.rebuild([entry1, entry2]);
+
+      searchIndex.removeFile('/test/file1.bib');
+
+      // DOI match should no longer return the removed entry
+      const matches = searchIndex.findDoiMatches(entry2);
+      assert.strictEqual(matches.length, 0);
+    });
+
+    test('should handle removing a file that is not indexed', () => {
+      const searchIndex = new SearchIndexManager();
+      searchIndex.rebuild([
+        createEntry({ key: 'entry1', file: '/test/file1.bib', titleFilter: 'test title' }),
+      ]);
+
+      // Should not throw
+      searchIndex.removeFile('/test/nonexistent.bib');
+
+      const results = searchIndex.search('test title');
+      assert.strictEqual(results.length, 1);
+    });
+
+    test('should remove all entries from a file with multiple entries', () => {
+      const searchIndex = new SearchIndexManager();
+      searchIndex.rebuild([
+        createEntry({
+          key: 'arrow1951',
+          file: '/test/refs.bib',
+          titleFilter: 'social choice and individual values',
+          authorNorm: 'arrow',
+        }),
+        createEntry({
+          key: 'nash1950',
+          file: '/test/refs.bib',
+          titleFilter: 'equilibrium points in n person games',
+          authorNorm: 'nash',
+        }),
+        createEntry({
+          key: 'other',
+          file: '/test/other.bib',
+          titleFilter: 'something else entirely',
+          authorNorm: 'other',
+        }),
+      ]);
+
+      searchIndex.removeFile('/test/refs.bib');
+
+      assert.strictEqual(searchIndex.search('social choice').length, 0);
+      assert.strictEqual(searchIndex.search('equilibrium').length, 0);
+      assert.strictEqual(searchIndex.search('something else').length, 1);
+    });
+  });
+
+  suite('addEntries', () => {
+    test('should add entries incrementally', () => {
+      const searchIndex = new SearchIndexManager();
+      searchIndex.rebuild([
+        createEntry({
+          key: 'entry1',
+          file: '/test/file1.bib',
+          titleFilter: 'social choice theory',
+          authorNorm: 'arrow',
+        }),
+      ]);
+
+      searchIndex.addEntries([
+        createEntry({
+          key: 'entry2',
+          file: '/test/file2.bib',
+          titleFilter: 'game theory introduction',
+          authorNorm: 'nash',
+        }),
+      ]);
+
+      const results1 = searchIndex.search('social choice');
+      assert.strictEqual(results1.length, 1);
+
+      const results2 = searchIndex.search('game theory');
+      assert.strictEqual(results2.length, 1);
+      assert.strictEqual(results2[0].key, 'entry2');
+    });
+
+    test('should make new entries findable by DOI', () => {
+      const searchIndex = new SearchIndexManager();
+      searchIndex.rebuild([]);
+
+      const entry = createEntry({
+        key: 'entry1',
+        file: '/test/file1.bib',
+        titleFilter: 'test title',
+        doi: '10.1234/added',
+      });
+      searchIndex.addEntries([entry]);
+
+      const entry2 = createEntry({
+        key: 'entry2',
+        file: '/test/file2.bib',
+        titleFilter: 'test title duplicate',
+        doi: '10.1234/added',
+      });
+      searchIndex.addEntries([entry2]);
+
+      const matches = searchIndex.findDoiMatches(entry);
+      assert.strictEqual(matches.length, 1);
+      assert.strictEqual(matches[0].key, 'entry2');
+    });
+
+    test('should make new entries findable as duplicate candidates', () => {
+      const searchIndex = new SearchIndexManager();
+      searchIndex.rebuild([]);
+
+      const entry1 = createEntry({
+        key: 'arrow1',
+        file: '/test/file1.bib',
+        titleFilter: 'social choice and individual values',
+        authorNorm: 'arrow',
+      });
+      const entry2 = createEntry({
+        key: 'arrow2',
+        file: '/test/file2.bib',
+        titleFilter: 'social choice and individual values',
+        authorNorm: 'arrow',
+      });
+
+      searchIndex.addEntries([entry1, entry2]);
+
+      const candidates = searchIndex.findDuplicateCandidates(entry1);
+      assert.ok(candidates.some(c => c.key === 'arrow2'));
+    });
+  });
+
+  suite('removeFile + addEntries (simulate re-index)', () => {
+    test('should correctly replace entries for a file', () => {
+      const searchIndex = new SearchIndexManager();
+      searchIndex.rebuild([
+        createEntry({
+          key: 'old_entry',
+          file: '/test/refs.bib',
+          titleFilter: 'old title before edit',
+          authorNorm: 'old',
+        }),
+        createEntry({
+          key: 'keep_entry',
+          file: '/test/other.bib',
+          titleFilter: 'this should stay',
+          authorNorm: 'keep',
+        }),
+      ]);
+
+      // Simulate re-indexing /test/refs.bib with updated content
+      searchIndex.removeFile('/test/refs.bib');
+      searchIndex.addEntries([
+        createEntry({
+          key: 'new_entry',
+          file: '/test/refs.bib',
+          titleFilter: 'new title after edit',
+          authorNorm: 'new',
+        }),
+      ]);
+
+      // Old entry gone
+      assert.strictEqual(searchIndex.search('old title').length, 0);
+      // New entry findable
+      assert.strictEqual(searchIndex.search('new title').length, 1);
+      assert.strictEqual(searchIndex.search('new title')[0].key, 'new_entry');
+      // Other file untouched
+      assert.strictEqual(searchIndex.search('this should stay').length, 1);
+    });
+
+    test('DOI mappings update correctly after re-index', () => {
+      const searchIndex = new SearchIndexManager();
+      const otherEntry = createEntry({
+        key: 'other',
+        file: '/test/other.bib',
+        titleFilter: 'other paper',
+        doi: '10.1234/shared',
+      });
+      searchIndex.rebuild([
+        createEntry({
+          key: 'old',
+          file: '/test/refs.bib',
+          titleFilter: 'old paper',
+          doi: '10.1234/shared',
+        }),
+        otherEntry,
+      ]);
+
+      // Before: other should find old via DOI
+      assert.strictEqual(searchIndex.findDoiMatches(otherEntry).length, 1);
+
+      // Re-index refs.bib without the DOI
+      searchIndex.removeFile('/test/refs.bib');
+      searchIndex.addEntries([
+        createEntry({
+          key: 'new',
+          file: '/test/refs.bib',
+          titleFilter: 'new paper no doi',
+        }),
+      ]);
+
+      // DOI match should be gone
+      assert.strictEqual(searchIndex.findDoiMatches(otherEntry).length, 0);
+
+      // Add it back with DOI
+      searchIndex.removeFile('/test/refs.bib');
+      searchIndex.addEntries([
+        createEntry({
+          key: 'newest',
+          file: '/test/refs.bib',
+          titleFilter: 'newest paper',
+          doi: '10.1234/shared',
+        }),
+      ]);
+
+      const matches = searchIndex.findDoiMatches(otherEntry);
+      assert.strictEqual(matches.length, 1);
+      assert.strictEqual(matches[0].key, 'newest');
+    });
+  });
 });
