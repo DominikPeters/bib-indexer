@@ -970,6 +970,49 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       display: block;
     }
 
+    .search-banner {
+      display: none;
+      padding: 4px 8px;
+      background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+      border-bottom: 1px solid var(--vscode-panel-border);
+      font-size: 0.85em;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    .search-banner.visible {
+      display: flex;
+    }
+
+    .search-banner a {
+      color: var(--vscode-textLink-foreground);
+      cursor: pointer;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .search-banner a:hover {
+      text-decoration: underline;
+    }
+
+    .search-banner-dismiss {
+      background: transparent;
+      border: none;
+      color: var(--vscode-descriptionForeground);
+      cursor: pointer;
+      padding: 2px 4px;
+      font-size: 1em;
+      line-height: 1;
+      flex-shrink: 0;
+      margin-left: 4px;
+    }
+
+    .search-banner-dismiss:hover {
+      color: var(--vscode-foreground);
+    }
+
     .content {
       flex: 1;
       overflow-y: auto;
@@ -1495,6 +1538,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         <button class="search-clear" id="searchClear" title="Clear search">×</button>
       </div>
     </div>
+    <div class="search-banner" id="searchBanner">
+      <a id="searchBannerLink">← Back to search: <span id="searchBannerQuery"></span></a>
+      <button class="search-banner-dismiss" id="searchBannerDismiss" title="Dismiss">×</button>
+    </div>
     <div class="content" id="content">
       <div class="placeholder">Loading...</div>
     </div>
@@ -1540,11 +1587,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const modalTitle = document.getElementById('modalTitle');
     const progressText = document.getElementById('progressText');
     const progressLabel = document.getElementById('progressLabel');
+    const searchBanner = document.getElementById('searchBanner');
+    const searchBannerLink = document.getElementById('searchBannerLink');
+    const searchBannerQuery = document.getElementById('searchBannerQuery');
+    const searchBannerDismiss = document.getElementById('searchBannerDismiss');
 
     let currentEntry = null;
     let isSearching = false;
     let canInsert = false;
     let debounceTimer;
+    let savedSearchQuery = '';
     const MAX_VALUE_LENGTH = 300;
 
     vscode.postMessage({ command: 'ready' });
@@ -1558,11 +1610,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       }
     }
 
+    function showSearchBanner(query) {
+      searchBannerQuery.textContent = '"' + query + '"';
+      searchBanner.classList.add('visible');
+    }
+
+    function hideSearchBanner() {
+      searchBanner.classList.remove('visible');
+      savedSearchQuery = '';
+    }
+
     // Clear search button handler
     searchClear.addEventListener('click', () => {
       searchInput.value = '';
       updateClearButton();
       isSearching = false;
+      hideSearchBanner();
       vscode.postMessage({ command: 'search', query: '' });
     });
 
@@ -1588,9 +1651,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       }
     });
 
+    searchBannerLink.addEventListener('click', () => {
+      searchInput.value = savedSearchQuery;
+      updateClearButton();
+      isSearching = true;
+      hideSearchBanner();
+      vscode.postMessage({ command: 'search', query: savedSearchQuery });
+    });
+
+    searchBannerDismiss.addEventListener('click', () => {
+      hideSearchBanner();
+    });
+
     searchInput.addEventListener('input', () => {
       clearTimeout(debounceTimer);
       updateClearButton();
+      hideSearchBanner();
       const query = searchInput.value.trim();
       isSearching = query.length > 0;
 
@@ -1609,10 +1685,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'matches':
-          if (!isSearching) {
-            currentEntry = message.currentEntry;
-            renderMatches(message.currentEntry, message.matches);
+          if (isSearching) {
+            savedSearchQuery = searchInput.value.trim();
+            isSearching = false;
+            searchInput.value = '';
+            updateClearButton();
+            showSearchBanner(savedSearchQuery);
           }
+          currentEntry = message.currentEntry;
+          renderMatches(message.currentEntry, message.matches);
           break;
 
         case 'searchResults':
