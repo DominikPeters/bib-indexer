@@ -8,7 +8,6 @@ import { BibIndexManager } from '../index';
 import { IndexedEntry } from '../types';
 import { findMatches, compareFields, FieldComparison } from '../matching';
 import { normalizeForFilter, parseBibFile } from '../parser';
-import { similarity } from '../matching';
 import { CANONICAL_FIELD_ORDER } from '../types';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
@@ -264,11 +263,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const allEntries = this.indexManager.getEntries();
     const config = vscode.workspace.getConfiguration('tooManyBibs');
     const threshold = config.get<number>('similarityThreshold') ?? 0.85;
+    const searchIndex = this.indexManager.getSearchIndex();
 
-    const matches = findMatches(this.currentEntry, allEntries, threshold);
+    // Use FlexSearch to get candidate entries with similar titles
+    const candidates = searchIndex.findDuplicateCandidates(this.currentEntry, 300);
+
+    // Also get exact DOI matches (these might not be in the title-based candidates)
+    const doiMatches = searchIndex.findDoiMatches(this.currentEntry);
+
+    // Combine candidates and DOI matches, removing duplicates
+    const candidateSet = new Set(candidates);
+    for (const match of doiMatches) {
+      candidateSet.add(match);
+    }
+    const allCandidates = Array.from(candidateSet);
+
+    // Now apply precise matching on the pre-filtered candidates
+    const matches = findMatches(this.currentEntry, allCandidates, threshold);
     const displayMatches = this.prepareMatchesForDisplay(this.currentEntry, matches);
 
     this._view.webview.postMessage({
@@ -288,10 +301,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     // Parse search query: extract quoted phrases and individual terms
     const { exactPhrases, terms } = this.parseSearchQuery(query);
-    const entries = this.indexManager.getEntries();
+
+    // Use FlexSearch to get initial candidates
+    const searchIndex = this.indexManager.getSearchIndex();
+    const candidates = searchIndex.search(query, 500);
+
+    // Filter candidates and score them
     const results: { entry: IndexedEntry; score: number }[] = [];
 
-    for (const entry of entries) {
+    for (const entry of candidates) {
       // Build searchable text from entry
       const searchText = [
         entry.titleFilter,
@@ -306,7 +324,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       );
       if (!allPhrasesMatch) continue;
 
-      // Check if ALL terms match (AND logic)
+      // Check if ALL terms match (AND logic) and calculate scores
       const termScores: number[] = [];
       let allTermsMatch = true;
 
@@ -321,22 +339,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         if (titleContains || authorContains || keyContains || yearMatch) {
           // Calculate similarity score for this term
-          const titleSim = titleContains ? 1 : similarity(normalizedTerm, entry.titleFilter);
-          const authorSim = authorContains ? 1 : similarity(normalizedTerm, entry.authorNorm);
+          const titleSim = titleContains ? 1 : 0.5;
+          const authorSim = authorContains ? 1 : 0.5;
           const keySim = keyContains ? 0.9 : 0;
           const yearSim = yearMatch ? 1 : 0;
           termScores.push(Math.max(titleSim, authorSim, keySim, yearSim));
         } else {
-          // Term not found - try fuzzy matching with higher threshold
-          const titleSim = similarity(normalizedTerm, entry.titleFilter);
-          const authorSim = similarity(normalizedTerm, entry.authorNorm);
-          const bestSim = Math.max(titleSim, authorSim);
-          if (bestSim >= 0.5) {
-            termScores.push(bestSim * 0.8); // Penalize fuzzy matches slightly
-          } else {
-            allTermsMatch = false;
-            break;
-          }
+          // Term not found in this entry
+          allTermsMatch = false;
+          break;
         }
       }
 

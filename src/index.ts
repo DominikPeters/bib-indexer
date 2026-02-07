@@ -8,6 +8,7 @@ import * as fsPromises from 'fs/promises';
 import * as path from 'path';
 import { BibIndex, IndexedEntry, IndexedFile } from './types';
 import { parseBibFile } from './parser';
+import { SearchIndexManager } from './search';
 
 // Bump this when parser changes require reindexing (e.g., field normalization changes)
 const INDEX_VERSION = 6;
@@ -21,6 +22,7 @@ export class BibIndexManager {
   private indexPath: string;
   private outputChannel: vscode.OutputChannel;
   private onDidUpdateEmitter = new vscode.EventEmitter<void>();
+  private searchIndex: SearchIndexManager;
 
   /** Event fired when background validation completes and index is updated */
   public readonly onDidUpdate = this.onDidUpdateEmitter.event;
@@ -32,6 +34,7 @@ export class BibIndexManager {
     this.indexPath = path.join(context.globalStorageUri.fsPath, INDEX_FILENAME);
     this.outputChannel = outputChannel;
     this.index = this.createEmptyIndex();
+    this.searchIndex = new SearchIndexManager();
   }
 
   /**
@@ -55,6 +58,7 @@ export class BibIndexManager {
         if (loaded.version === INDEX_VERSION) {
           this.index = loaded;
           this.normalizeLoadedEntries(this.index.entries);
+          this.searchIndex.rebuild(this.index.entries);
           this.log(`Loaded index with ${this.index.entries.length} entries from ${Object.keys(this.index.files).length} files`);
         } else {
           this.log('Index version mismatch, will rebuild in background...');
@@ -150,6 +154,7 @@ export class BibIndexManager {
 
     // Scan the new folder
     await this.scanFolder(resolvedPath);
+    this.searchIndex.rebuild(this.index.entries);
     this.saveIndex();
 
     vscode.window.showInformationMessage(`Added folder to index: ${resolvedPath}`);
@@ -178,6 +183,7 @@ export class BibIndexManager {
       }
     }
 
+    this.searchIndex.rebuild(this.index.entries);
     this.saveIndex();
     vscode.window.showInformationMessage(`Removed folder from index: ${resolvedPath}`);
   }
@@ -217,6 +223,7 @@ export class BibIndexManager {
     }
 
     await this.indexFile(resolvedPath);
+    this.searchIndex.rebuild(this.index.entries);
     this.saveIndex();
 
     vscode.window.showInformationMessage(`Added file to index: ${path.basename(resolvedPath)}`);
@@ -246,6 +253,7 @@ export class BibIndexManager {
     }
 
     this.removeFileFromIndex(resolvedPath);
+    this.searchIndex.rebuild(this.index.entries);
     this.saveIndex();
   }
 
@@ -305,6 +313,13 @@ export class BibIndexManager {
   }
 
   /**
+   * Get the search index for fast searches
+   */
+  getSearchIndex(): SearchIndexManager {
+    return this.searchIndex;
+  }
+
+  /**
    * Reindex all files (sync version for user-triggered actions with progress)
    */
   async reindexAll(): Promise<void> {
@@ -324,6 +339,7 @@ export class BibIndexManager {
       }
     }
 
+    this.searchIndex.rebuild(this.index.entries);
     this.saveIndex();
     this.log(`Reindex complete: ${this.index.entries.length} entries from ${Object.keys(this.index.files).length} files`);
   }
@@ -353,6 +369,7 @@ export class BibIndexManager {
       }
     }
 
+    this.searchIndex.rebuild(this.index.entries);
     this.saveIndex();
     this.log(`Background reindex complete: ${this.index.entries.length} entries from ${Object.keys(this.index.files).length} files`);
   }
@@ -405,6 +422,7 @@ export class BibIndexManager {
     }
 
     if (filesToRemove.length > 0 || filesToReindex.length > 0) {
+      this.searchIndex.rebuild(this.index.entries);
       this.saveIndex();
       this.log(`Updated index: removed ${filesToRemove.length} files, reindexed ${filesToReindex.length} files`);
     }

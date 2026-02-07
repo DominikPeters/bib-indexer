@@ -107,6 +107,7 @@
     "@vscode/test-electron": "^2.3.9"
   },
   "dependencies": {
-    "@retorquere/bibtex-parser": "^7.0.0"
+    "@retorquere/bibtex-parser": "^7.0.0",
+    "flexsearch": "^0.7.43"
   }
 }
