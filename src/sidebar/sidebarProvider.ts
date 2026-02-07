@@ -154,6 +154,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  getCurrentEntry(): IndexedEntry | null {
+    return this.currentEntry;
+  }
+
   clearCurrentEntry(): void {
     this.currentEntry = null;
     this.currentEditor = null;
@@ -719,7 +723,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     // Visual feedback is handled in the webview
   }
 
-  private async handleInsertField(file: string, key: string, field: string): Promise<void> {
+  async handleInsertField(file: string, key: string, field: string): Promise<void> {
     const entry = this.findEntry(file, key);
     if (!entry || !this.currentEditor || !this.currentEntry) return;
 
@@ -779,7 +783,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     vscode.window.showInformationMessage(`Inserted ${field}`);
   }
 
-  private async handleInsertEntry(file: string, key: string): Promise<void> {
+  async handleInsertEntry(file: string, key: string): Promise<void> {
     const entry = this.findEntry(file, key);
     if (!entry) return;
 
