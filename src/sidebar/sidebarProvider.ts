@@ -6,7 +6,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { BibIndexManager } from '../index';
 import { IndexedEntry } from '../types';
-import { findMatches, compareFields, FieldComparison } from '../matching';
+import { findMatches } from '../matching';
 import { normalizeForFilter, parseBibFile } from '../parser';
 import { CANONICAL_FIELD_ORDER } from '../types';
 import { findEntryInsertionPoint, formatBibtex, determineBlankLines } from '../insertion';
@@ -47,78 +47,83 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     webviewView.webview.html = this.getHtmlContent();
 
     webviewView.webview.onDidReceiveMessage(async (message) => {
-      switch (message.command) {
-        case 'search':
-          this.handleSearch(message.query);
-          break;
+      try {
+        switch (message.command) {
+          case 'search':
+            this.handleSearch(message.query);
+            break;
 
-        case 'copyEntry':
-          this.handleCopyEntry(message.file, message.key);
-          break;
+          case 'copyEntry':
+            await this.handleCopyEntry(message.file, message.key);
+            break;
 
-        case 'insertField':
-          this.handleInsertField(message.file, message.key, message.field);
-          break;
+          case 'insertField':
+            await this.handleInsertField(message.file, message.key, message.field);
+            break;
 
-        case 'insertEntry':
-          this.handleInsertEntry(message.file, message.key);
-          break;
+          case 'insertEntry':
+            await this.handleInsertEntry(message.file, message.key);
+            break;
 
-        case 'showManageFiles':
-          this.sendFileManagementData();
-          break;
+          case 'showManageFiles':
+            this.sendFileManagementData();
+            break;
 
-        case 'hideManageFiles':
-          this.updateMatches();
-          break;
+          case 'hideManageFiles':
+            this.updateMatches();
+            break;
 
-        case 'addFolder':
-          vscode.commands.executeCommand('tooManyBibs.addFolder');
-          break;
+          case 'addFolder':
+            await vscode.commands.executeCommand('tooManyBibs.addFolder');
+            break;
 
-        case 'addFile':
-          const fileUri = await vscode.window.showOpenDialog({
-            canSelectFiles: true,
-            canSelectFolders: false,
-            canSelectMany: false,
-            filters: { 'BibTeX files': ['bib'] },
-            openLabel: 'Add File to Index',
-          });
-          if (fileUri && fileUri.length > 0) {
-            await this.indexManager.addFile(fileUri[0].fsPath);
+          case 'addFile':
+            const fileUri = await vscode.window.showOpenDialog({
+              canSelectFiles: true,
+              canSelectFolders: false,
+              canSelectMany: false,
+              filters: { 'BibTeX files': ['bib'] },
+              openLabel: 'Add File to Index',
+            });
+            if (fileUri && fileUri.length > 0) {
+              await this.indexManager.addFile(fileUri[0].fsPath);
+              this.sendFileManagementData();
+              this.refresh();
+            }
+            break;
+
+          case 'reindex':
+            await vscode.commands.executeCommand('tooManyBibs.reindex');
+            break;
+
+          case 'removeFile':
+            this.indexManager.removeFile(message.file);
             this.sendFileManagementData();
             this.refresh();
-          }
-          break;
+            break;
 
-        case 'reindex':
-          vscode.commands.executeCommand('tooManyBibs.reindex');
-          break;
+          case 'removeFolder':
+            await this.indexManager.removeFolder(message.folder);
+            this.sendFileManagementData();
+            this.refresh();
+            break;
 
-        case 'removeFile':
-          this.indexManager.removeFile(message.file);
-          this.sendFileManagementData();
-          this.refresh();
-          break;
+          case 'showFilesModal':
+            this.sendFilesModalData(message.entries);
+            break;
 
-        case 'removeFolder':
-          await this.indexManager.removeFolder(message.folder);
-          this.sendFileManagementData();
-          this.refresh();
-          break;
+          case 'openFile':
+            await this.handleOpenFile(message.file, message.line);
+            break;
 
-        case 'showFilesModal':
-          this.sendFilesModalData(message.entries);
-          break;
-
-        case 'openFile':
-          this.handleOpenFile(message.file, message.line);
-          break;
-
-        case 'ready':
-          this.sendStatus();
-          this.updateMatches();
-          break;
+          case 'ready':
+            this.sendStatus();
+            this.updateMatches();
+            break;
+        }
+      } catch (error) {
+        const messageText = error instanceof Error ? error.message : String(error);
+        vscode.window.showErrorMessage(`Too Many Bibs: ${messageText}`);
       }
     });
   }
@@ -754,9 +759,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const fieldLine = `${indent}${field} = {${value}},`;
 
     if (existingFieldLine >= 0) {
+      const existingFieldEndLine = this.findExistingFieldEndLine(lines, existingFieldLine, entryEnd);
       const lineRange = new vscode.Range(
         existingFieldLine, 0,
-        existingFieldLine, lines[existingFieldLine].length
+        existingFieldEndLine, lines[existingFieldEndLine].length
       );
       edit.replace(document.uri, lineRange, fieldLine);
     } else {
@@ -779,7 +785,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       edit.insert(document.uri, insertPos, fieldLine + '\n');
     }
 
-    await vscode.workspace.applyEdit(edit);
+    const applied = await vscode.workspace.applyEdit(edit);
+    if (!applied) {
+      vscode.window.showErrorMessage(`Failed to insert ${field}`);
+      return;
+    }
     vscode.window.showInformationMessage(`Inserted ${field}`);
   }
 
@@ -819,8 +829,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const insertPos = new vscode.Position(insertLine, 0);
     edit.insert(document.uri, insertPos, textToInsert);
 
-    await vscode.workspace.applyEdit(edit);
+    const applied = await vscode.workspace.applyEdit(edit);
+    if (!applied) {
+      vscode.window.showErrorMessage(`Failed to insert @${entry.entryType}{${entry.key}}`);
+      return;
+    }
     vscode.window.showInformationMessage(`Inserted @${entry.entryType}{${entry.key}}`);
+  }
+
+  private findExistingFieldEndLine(lines: string[], fieldStart: number, entryEnd: number): number {
+    for (let i = fieldStart + 1; i <= entryEnd; i++) {
+      if (/^\s*\w+\s*=/.test(lines[i])) {
+        return i - 1;
+      }
+    }
+    return Math.max(fieldStart, entryEnd - 1);
   }
 
   private detectFieldIndentation(lines: string[], entryStart: number, entryEnd: number): string {
@@ -880,13 +903,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   }
 
   private getHtmlContent(): string {
+    const nonce = getNonce();
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
+  <style nonce="${nonce}">
     * { box-sizing: border-box; }
 
     body {
@@ -1499,7 +1523,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     </div>
   </div>
 
-  <script>
+  <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const searchInput = document.getElementById('searchInput');
     const searchClear = document.getElementById('searchClear');
@@ -2002,6 +2026,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 </body>
 </html>`;
   }
+}
+
+function getNonce(): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let nonce = '';
+  for (let i = 0; i < 32; i++) {
+    nonce += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return nonce;
 }
 
 interface DisplayEntry {

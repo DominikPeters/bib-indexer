@@ -309,7 +309,7 @@ export class BibIndexManager {
    * Get entries from a specific file
    */
   getEntriesForFile(filePath: string): IndexedEntry[] {
-    return this.index.entries.filter(e => e.file === filePath);
+    return [...(this.entriesByFile.get(filePath) ?? [])];
   }
 
   /**
@@ -383,6 +383,7 @@ export class BibIndexManager {
   private async validateAndUpdate(): Promise<void> {
     const filesToReindex: string[] = [];
     const filesToRemove: string[] = [];
+    let didMutate = false;
 
     // Check existing indexed files
     for (const [filePath, fileInfo] of Object.entries(this.index.files)) {
@@ -399,16 +400,21 @@ export class BibIndexManager {
     // Remove entries for deleted files
     for (const filePath of filesToRemove) {
       this.removeFileFromIndex(filePath);
+      didMutate = true;
     }
 
     // Reindex changed files
     for (const filePath of filesToReindex) {
       await this.indexFile(filePath);
+      didMutate = true;
     }
 
     // Scan folders for new files (respects exclusions)
     for (const folder of this.index.folders) {
-      await this.scanFolder(folder, true);
+      const indexedCount = await this.scanFolder(folder, true);
+      if (indexedCount > 0) {
+        didMutate = true;
+      }
     }
 
     // Check individual files
@@ -417,13 +423,14 @@ export class BibIndexManager {
         try {
           await fsPromises.access(filePath);
           await this.indexFile(filePath);
+          didMutate = true;
         } catch {
           // File doesn't exist
         }
       }
     }
 
-    if (filesToRemove.length > 0 || filesToReindex.length > 0) {
+    if (didMutate) {
       this.saveIndex();
       this.log(`Updated index: removed ${filesToRemove.length} files, reindexed ${filesToReindex.length} files`);
     }
@@ -432,15 +439,16 @@ export class BibIndexManager {
   /**
    * Scan a folder recursively for .bib files
    */
-  private async scanFolder(folderPath: string, skipExisting = false): Promise<void> {
+  private async scanFolder(folderPath: string, skipExisting = false): Promise<number> {
     try {
       await fsPromises.access(folderPath);
     } catch {
-      return;
+      return 0;
     }
 
     const bibFiles = await this.findBibFiles(folderPath);
     this.log(`Found ${bibFiles.length} .bib files in ${folderPath}`);
+    let indexedCount = 0;
 
     for (const filePath of bibFiles) {
       if (this.index.excludedFiles.includes(filePath)) {
@@ -450,7 +458,9 @@ export class BibIndexManager {
         continue;
       }
       await this.indexFile(filePath);
+      indexedCount++;
     }
+    return indexedCount;
   }
 
   /**
@@ -542,7 +552,7 @@ export class BibIndexManager {
    */
   startWatching(): vscode.Disposable {
     const watcher = vscode.workspace.createFileSystemWatcher('**/*.bib');
-    let debounceTimer: NodeJS.Timeout | undefined;
+    const debounceTimers = new Map<string, NodeJS.Timeout>();
 
     const handleChange = (uri: vscode.Uri) => {
       const filePath = uri.fsPath;
@@ -554,15 +564,18 @@ export class BibIndexManager {
         return;
       }
 
-      if (debounceTimer) {
-        clearTimeout(debounceTimer);
+      const existingTimer = debounceTimers.get(filePath);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
       }
-      debounceTimer = setTimeout(async () => {
+      const timer = setTimeout(async () => {
         this.log(`File changed: ${path.basename(filePath)}`);
         await this.indexFile(filePath);
         this.saveIndex();
         this.onDidUpdateEmitter.fire();
+        debounceTimers.delete(filePath);
       }, 500);
+      debounceTimers.set(filePath, timer);
     };
 
     const handleCreate = (uri: vscode.Uri) => {
@@ -574,15 +587,18 @@ export class BibIndexManager {
         return; // Already indexed
       }
 
-      if (debounceTimer) {
-        clearTimeout(debounceTimer);
+      const existingTimer = debounceTimers.get(filePath);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
       }
-      debounceTimer = setTimeout(async () => {
+      const timer = setTimeout(async () => {
         this.log(`File created: ${path.basename(filePath)}`);
         await this.indexFile(filePath);
         this.saveIndex();
         this.onDidUpdateEmitter.fire();
+        debounceTimers.delete(filePath);
       }, 500);
+      debounceTimers.set(filePath, timer);
     };
 
     const handleDelete = (uri: vscode.Uri) => {
@@ -602,9 +618,10 @@ export class BibIndexManager {
     watcher.onDidDelete(handleDelete);
 
     return new vscode.Disposable(() => {
-      if (debounceTimer) {
-        clearTimeout(debounceTimer);
+      for (const timer of debounceTimers.values()) {
+        clearTimeout(timer);
       }
+      debounceTimers.clear();
       watcher.dispose();
     });
   }

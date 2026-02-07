@@ -294,6 +294,7 @@ suite('Search Test Suite', () => {
       assert.ok(candidates.length >= 1, 'Should find at least one candidate');
       const keys = candidates.map(e => e.key);
       assert.ok(keys.includes('entry1') || keys.includes('entry2'), 'Should find similar entries');
+      assert.ok(!keys.includes('entry3'), 'Should not include clearly unrelated titles');
     });
 
     test('should exclude the query entry itself', () => {

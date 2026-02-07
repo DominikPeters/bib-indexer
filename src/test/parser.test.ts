@@ -230,8 +230,8 @@ suite('Parser Test Suite', () => {
 }`;
     const result = parseBibFile(content, '/test/file.bib');
 
-    // Should still parse the valid entries
-    assert.ok(result.entries.length >= 1);
+    // Should still parse valid entries and report parsing errors
+    assert.ok(result.errors.length > 0, 'Parser should report at least one error');
     assert.ok(result.entries.some(e => e.key === 'good'));
   });
 

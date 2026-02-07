@@ -14,8 +14,44 @@ function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function waitForCondition(
+  predicate: () => boolean,
+  timeoutMs = 5000,
+  intervalMs = 100
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) {
+      return true;
+    }
+    await wait(intervalMs);
+  }
+  return predicate();
+}
+
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'tmb-test-'));
+}
+
+function createWorkspaceTempDir(): string {
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const baseDir = workspaceRoot ?? fixturesDir;
+  return fs.mkdtempSync(path.join(baseDir, 'tmb-watch-'));
+}
+
+function cleanupFixtureTmpDirs(): void {
+  const entries = fs.readdirSync(fixturesDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isDirectory() && entry.name.startsWith('tmp-')) {
+      fs.rmSync(path.join(fixturesDir, entry.name), { recursive: true, force: true });
+    }
+  }
+}
+
+function writeBibFile(dir: string, name: string, content: string): string {
+  const filePath = path.join(dir, name);
+  fs.writeFileSync(filePath, content, 'utf-8');
+  return filePath;
 }
 
 function createMockContext(storageDir: string): vscode.ExtensionContext {
@@ -51,11 +87,13 @@ suite('Integration: BibIndexManager with real files', () => {
   let storageDir: string;
 
   setup(() => {
+    cleanupFixtureTmpDirs();
     storageDir = createTempDir();
     indexManager = createTestIndexManager(storageDir);
   });
 
   teardown(() => {
+    cleanupFixtureTmpDirs();
     fs.rmSync(storageDir, { recursive: true, force: true });
   });
 
@@ -119,6 +157,128 @@ suite('Integration: BibIndexManager with real files', () => {
     const candidates = searchIndex.findDuplicateCandidates(nashEntry);
     const nashDuplicate = candidates.find(c => c.file === sample2Bib && c.key === 'nash1950equilibrium');
     assert.ok(nashDuplicate, 'Should find Nash duplicate from sample2.bib');
+  });
+
+  test('should persist newly discovered files during background validation', async () => {
+    const folder = createTempDir();
+    const first = writeBibFile(folder, 'first.bib', `@article{first,
+  title = {First},
+  author = {One, Author},
+  year = {2020}
+}`);
+
+    await indexManager.addFolder(folder);
+    assert.strictEqual(indexManager.getEntriesForFile(first).length, 1);
+
+    const second = writeBibFile(folder, 'second.bib', `@article{second,
+  title = {Second},
+  author = {Two, Author},
+  year = {2021}
+}`);
+
+    await (indexManager as any).validateAndUpdate();
+    assert.strictEqual(indexManager.getEntriesForFile(second).length, 1, 'New file should be indexed');
+
+    const reloaded = createTestIndexManager(storageDir);
+    await reloaded.initialize();
+    assert.strictEqual(reloaded.getEntriesForFile(second).length, 1, 'Newly discovered file should persist across reload');
+
+    fs.rmSync(folder, { recursive: true, force: true });
+  });
+
+  test('should persist newly discovered individual files during background validation', async () => {
+    const first = writeBibFile(fixturesDir, 'tmp-individual-first.bib', `@article{tmpFirst,
+  title = {Tmp First},
+  author = {Tmp, One},
+  year = {2020}
+}`);
+    const second = path.join(fixturesDir, 'tmp-individual-second.bib');
+
+    await indexManager.addFile(first);
+    assert.strictEqual(indexManager.getEntriesForFile(first).length, 1);
+
+    const rawIndexManager = indexManager as unknown as {
+      index: { individualFiles: string[] };
+      validateAndUpdate: () => Promise<void>;
+    };
+    rawIndexManager.index.individualFiles.push(second);
+
+    writeBibFile(fixturesDir, 'tmp-individual-second.bib', `@article{tmpSecond,
+  title = {Tmp Second},
+  author = {Tmp, Two},
+  year = {2021}
+}`);
+
+    await rawIndexManager.validateAndUpdate();
+    assert.strictEqual(indexManager.getEntriesForFile(second).length, 1, 'Second individual file should be indexed');
+
+    const reloaded = createTestIndexManager(storageDir);
+    await reloaded.initialize();
+    assert.strictEqual(reloaded.getEntriesForFile(second).length, 1, 'Second individual file should persist across reload');
+
+    fs.rmSync(first, { force: true });
+    fs.rmSync(second, { force: true });
+  });
+
+  test('should debounce file watcher per file without dropping parallel updates', async function() {
+    this.timeout(10000);
+    const folder = createWorkspaceTempDir();
+    const fileA = writeBibFile(folder, 'a.bib', `@article{a0,
+  title = {A0},
+  author = {A, Author},
+  year = {2020}
+}`);
+    const fileB = writeBibFile(folder, 'b.bib', `@article{b0,
+  title = {B0},
+  author = {B, Author},
+  year = {2020}
+}`);
+
+    await indexManager.addFolder(folder);
+    const watcher = indexManager.startWatching();
+    try {
+      // Give the watcher a moment to start delivering events.
+      await wait(200);
+
+      fs.writeFileSync(fileA, `@article{a0,
+  title = {A0},
+  author = {A, Author},
+  year = {2020}
+}
+
+@article{a1,
+  title = {A1},
+  author = {A, Author},
+  year = {2021}
+}`, 'utf-8');
+
+      fs.writeFileSync(fileB, `@article{b0,
+  title = {B0},
+  author = {B, Author},
+  year = {2020}
+}
+
+@article{b1,
+  title = {B1},
+  author = {B, Author},
+  year = {2021}
+}`, 'utf-8');
+
+      const updated = await waitForCondition(() => {
+        const aKeys = indexManager.getEntriesForFile(fileA).map(e => e.key);
+        const bKeys = indexManager.getEntriesForFile(fileB).map(e => e.key);
+        return aKeys.includes('a1') && bKeys.includes('b1');
+      });
+
+      const aKeys = indexManager.getEntriesForFile(fileA).map(e => e.key);
+      const bKeys = indexManager.getEntriesForFile(fileB).map(e => e.key);
+      assert.ok(updated, 'Watcher should index both updated files within timeout');
+      assert.ok(aKeys.includes('a1'), 'Watcher should apply update for file A');
+      assert.ok(bKeys.includes('b1'), 'Watcher should apply update for file B');
+    } finally {
+      watcher.dispose();
+      fs.rmSync(folder, { recursive: true, force: true });
+    }
   });
 });
 
@@ -270,6 +430,71 @@ suite('Integration: Field and entry insertion', () => {
     assert.ok(doiLine, 'doi line should exist');
     // sample.bib uses 2-space indent
     assert.ok(doiLine!.startsWith('  '), `Inserted field should use 2-space indent, got: "${doiLine}"`);
+  });
+
+  test('should replace an existing multiline field without leaving stale lines', async () => {
+    const tempDir = createTempDir();
+    const targetPath = writeBibFile(tempDir, 'target.bib', `@article{multiline,
+  title = {Target},
+  author = {Author, Target},
+  note = {Line one
+    line two
+    line three},
+  year = {2020}
+}`);
+    const sourcePath = writeBibFile(tempDir, 'source.bib', `@article{multiline,
+  title = {Target},
+  author = {Author, Target},
+  note = {Replacement note},
+  year = {2020}
+}`);
+
+    await indexManager.addFile(sourcePath);
+    const doc = await vscode.workspace.openTextDocument(targetPath);
+    const editor = await vscode.window.showTextDocument(doc);
+    setCursor(editor, 2);
+    sidebarProvider.onCursorMoved(editor);
+
+    await sidebarProvider.handleInsertField(sourcePath, 'multiline', 'note');
+
+    const text = editor.document.getText();
+    assert.ok(text.includes('note = {Replacement note},'));
+    assert.ok(!text.includes('line two'), 'Old multiline continuation should be removed');
+    assert.ok(!text.includes('line three'), 'Old multiline continuation should be removed');
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test('should replace multiline field when it is the last field before closing brace', async () => {
+    const tempDir = createTempDir();
+    const targetPath = writeBibFile(tempDir, 'target-last.bib', `@article{multilineLast,
+  title = {Target},
+  author = {Author, Target},
+  note = {Line one
+    line two
+    line three}
+}`);
+    const sourcePath = writeBibFile(tempDir, 'source-last.bib', `@article{multilineLast,
+  title = {Target},
+  author = {Author, Target},
+  note = {Replacement final note}
+}`);
+
+    await indexManager.addFile(sourcePath);
+    const doc = await vscode.workspace.openTextDocument(targetPath);
+    const editor = await vscode.window.showTextDocument(doc);
+    setCursor(editor, 2);
+    sidebarProvider.onCursorMoved(editor);
+
+    await sidebarProvider.handleInsertField(sourcePath, 'multilineLast', 'note');
+
+    const text = editor.document.getText();
+    assert.ok(text.includes('note = {Replacement final note},'));
+    assert.ok(!text.includes('line two'), 'Old multiline continuation should be removed');
+    assert.ok(!text.includes('line three'), 'Old multiline continuation should be removed');
+    assert.ok(text.includes('\n}'), 'Closing brace should remain intact');
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
   });
 });
 
