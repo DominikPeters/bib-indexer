@@ -9,6 +9,7 @@ import { IndexedEntry } from '../types';
 import { findMatches, compareFields, FieldComparison } from '../matching';
 import { normalizeForFilter, parseBibFile } from '../parser';
 import { CANONICAL_FIELD_ORDER } from '../types';
+import { findEntryInsertionPoint, formatBibtex, determineBlankLines } from '../insertion';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
@@ -47,6 +48,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         case 'insertField':
           this.handleInsertField(message.file, message.key, message.field);
+          break;
+
+        case 'insertEntry':
+          this.handleInsertEntry(message.file, message.key);
           break;
 
         case 'showManageFiles':
@@ -381,6 +386,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this._view.webview.postMessage({
       command: 'searchResults',
       results: displayResults,
+      canInsert: this.isCurrentEditorBibFile(),
     });
   }
 
@@ -731,9 +737,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const entry = this.findEntry(file, key);
     if (!entry) return;
 
-    const bibtex = this.formatBibtex(entry);
+    const bibtex = formatBibtex(entry);
     await vscode.env.clipboard.writeText(bibtex);
-    vscode.window.showInformationMessage('Entry copied to clipboard');
   }
 
   private async handleInsertField(file: string, key: string, field: string): Promise<void> {
@@ -796,6 +801,46 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     vscode.window.showInformationMessage(`Inserted ${field}`);
   }
 
+  private async handleInsertEntry(file: string, key: string): Promise<void> {
+    const entry = this.findEntry(file, key);
+    if (!entry) return;
+
+    const editor = this.currentEditor ?? vscode.window.activeTextEditor;
+    if (!editor) {
+      vscode.window.showErrorMessage('No active editor to insert entry into');
+      return;
+    }
+
+    const document = editor.document;
+    const content = document.getText();
+    const lines = content.split('\n');
+
+    // Find a safe insertion point
+    const insertLine = findEntryInsertionPoint(lines, this.currentEntry);
+
+    const bibtex = formatBibtex(entry);
+    const edit = new vscode.WorkspaceEdit();
+
+    // Determine if blank lines are needed
+    const { needsBlankBefore, needsBlankAfter } = determineBlankLines(lines, insertLine);
+
+    let textToInsert = '';
+    if (needsBlankBefore) {
+      textToInsert += '\n';
+    }
+    textToInsert += bibtex;
+    if (needsBlankAfter) {
+      textToInsert += '\n';
+    }
+    textToInsert += '\n';
+
+    const insertPos = new vscode.Position(insertLine, 0);
+    edit.insert(document.uri, insertPos, textToInsert);
+
+    await vscode.workspace.applyEdit(edit);
+    vscode.window.showInformationMessage(`Inserted @${entry.entryType}{${entry.key}}`);
+  }
+
   private detectFieldIndentation(lines: string[], entryStart: number, entryEnd: number): string {
     // Look for existing field lines to detect indentation
     for (let i = entryStart + 1; i <= entryEnd; i++) {
@@ -846,24 +891,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     );
   }
 
-  private formatBibtex(entry: IndexedEntry): string {
-    const lines: string[] = [];
-    lines.push(`@${entry.entryType}{${entry.key},`);
-
-    const sortedFields = Object.entries(entry.fields).sort(([a], [b]) => {
-      const aIdx = CANONICAL_FIELD_ORDER.indexOf(a);
-      const bIdx = CANONICAL_FIELD_ORDER.indexOf(b);
-      const aOrder = aIdx === -1 ? 999 : aIdx;
-      const bOrder = bIdx === -1 ? 999 : bIdx;
-      return aOrder - bOrder;
-    });
-
-    for (const [key, value] of sortedFields) {
-      lines.push(`  ${key} = {${value}},`);
-    }
-
-    lines.push('}');
-    return lines.join('\n');
+  private isCurrentEditorBibFile(): boolean {
+    const editor = this.currentEditor ?? vscode.window.activeTextEditor;
+    if (!editor) return false;
+    return editor.document.fileName.endsWith('.bib');
   }
 
   private getHtmlContent(): string {
@@ -1477,6 +1508,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     let currentEntry = null;
     let isSearching = false;
+    let canInsert = false;
     let debounceTimer;
     const MAX_VALUE_LENGTH = 300;
 
@@ -1549,7 +1581,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'searchResults':
-          renderSearchResults(message.results);
+          canInsert = message.canInsert;
+          renderSearchResults(message.results, canInsert);
           break;
 
         case 'fileManagementData':
@@ -1583,7 +1616,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       } else {
         html += '<div class="section-header">Matches from other files</div>';
         matches.forEach(match => {
-          html += renderEntryCard(match, true);
+          html += renderEntryCard(match, true, true);
         });
       }
 
@@ -1591,7 +1624,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       attachEventListeners();
     }
 
-    function renderSearchResults(results) {
+    function renderSearchResults(results, canInsert) {
       if (results.length === 0) {
         content.innerHTML = '<div class="placeholder">No results found</div>';
         return;
@@ -1599,14 +1632,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
       let html = '<div class="section-header">Search results</div>';
       results.forEach(entry => {
-        html += renderEntryCard(entry, false);
+        html += renderEntryCard(entry, false, canInsert);
       });
 
       content.innerHTML = html;
       attachEventListeners();
     }
 
-    function renderEntryCard(entry, showFieldComparison) {
+    function renderEntryCard(entry, showFieldComparison, canInsertEntry = false) {
       let html = '<div class="entry-card">';
 
       html += '<div class="entry-header">';
@@ -1673,6 +1706,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       html += '<div class="entry-actions">';
       html += '<button data-action="copy" data-file="' + escapeHtml(entry.file) +
         '" data-key="' + escapeHtml(entry.key) + '">Copy entry</button>';
+      if (showFieldComparison || canInsertEntry) {
+        html += ' <button data-action="insertEntry" data-file="' + escapeHtml(entry.file) +
+          '" data-key="' + escapeHtml(entry.key) + '" title="Insert entry into current file">→</button>';
+      }
       html += '</div>';
 
       html += '</div>';
@@ -1890,6 +1927,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ command: 'copyEntry', file, key });
           } else if (action === 'insert') {
             vscode.postMessage({ command: 'insertField', file, key, field });
+          } else if (action === 'insertEntry') {
+            vscode.postMessage({ command: 'insertEntry', file, key });
           }
         });
       });
