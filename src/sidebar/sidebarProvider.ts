@@ -739,6 +739,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     const bibtex = formatBibtex(entry);
     await vscode.env.clipboard.writeText(bibtex);
+    // Visual feedback is handled in the webview
   }
 
   private async handleInsertField(file: string, key: string, field: string): Promise<void> {
@@ -1561,7 +1562,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
       debounceTimer = setTimeout(() => {
         vscode.postMessage({ command: 'search', query });
-      }, 200);
+      }, 50);
     });
 
     window.addEventListener('message', (event) => {
@@ -1911,6 +1912,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       modalBody.querySelectorAll('.modal-copy-btn').forEach(btn => {
         btn.addEventListener('click', () => {
           vscode.postMessage({ command: 'copyEntry', file: btn.dataset.file, key: btn.dataset.key });
+          showCopyFeedback(btn);
         });
       });
     }
@@ -1925,6 +1927,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
           if (action === 'copy') {
             vscode.postMessage({ command: 'copyEntry', file, key });
+            showCopyFeedback(btn);
           } else if (action === 'insert') {
             vscode.postMessage({ command: 'insertField', file, key, field });
           } else if (action === 'insertEntry') {
@@ -1953,6 +1956,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           }
         });
       });
+    }
+
+    function showCopyFeedback(btn) {
+      const originalText = btn.textContent;
+      btn.textContent = 'Copied!';
+      btn.disabled = true;
+      setTimeout(() => {
+        btn.textContent = originalText;
+        btn.disabled = false;
+      }, 1500);
     }
 
     function escapeHtml(text) {
