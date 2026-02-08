@@ -1,8 +1,8 @@
 /**
- * Entry matching and clustering logic
+ * Entry matching, clustering, and super card merging logic
  */
 
-import { IndexedEntry, EntryCluster, EntryVariant } from './types';
+import { IndexedEntry, ParsedName, SuperCard, PaperCluster } from './types';
 
 /**
  * Find entries that match a given entry
@@ -21,18 +21,7 @@ export function findMatches(
       continue;
     }
 
-    // DOI match = high confidence
-    if (entry.doi && candidate.doi && entry.doi === candidate.doi) {
-      matches.push(candidate);
-      continue;
-    }
-
-    // Title + Author similarity
-    const titleSim = similarity(entry.titleFilter, candidate.titleFilter);
-    const authorSim = similarity(entry.authorNorm, candidate.authorNorm);
-
-    // Both title and author should be similar
-    if (titleSim >= threshold && authorSim >= threshold) {
+    if (entriesMatch(entry, candidate, threshold)) {
       matches.push(candidate);
     }
   }
@@ -41,67 +30,19 @@ export function findMatches(
 }
 
 /**
- * Group matching entries into clusters
- * Entries in the same cluster represent the same bibliographic work
+ * Check if two entries represent the same paper
  */
-export function clusterMatches(
-  currentEntry: IndexedEntry,
-  matches: IndexedEntry[]
-): EntryCluster | null {
-  if (matches.length === 0) {
-    return null;
+function entriesMatch(a: IndexedEntry, b: IndexedEntry, threshold: number): boolean {
+  // DOI match = high confidence
+  if (a.doi && b.doi && a.doi === b.doi) {
+    return true;
   }
 
-  // All entries in the cluster (including current)
-  const allEntries = [currentEntry, ...matches];
+  // Title + Author similarity
+  const titleSim = similarity(a.titleFilter, b.titleFilter);
+  const authorSim = similarity(a.authorNorm, b.authorNorm);
 
-  // Group into variants based on titleCluster (preserves braces) and field set
-  const variantMap = new Map<string, IndexedEntry[]>();
-
-  for (const entry of allEntries) {
-    const variantKey = computeVariantKey(entry);
-    const existing = variantMap.get(variantKey) ?? [];
-    existing.push(entry);
-    variantMap.set(variantKey, existing);
-  }
-
-  const variants: EntryVariant[] = [];
-  for (const entries of variantMap.values()) {
-    const representative = entries[0];
-    const fieldSet = Object.keys(representative.fields).sort();
-
-    variants.push({
-      files: entries.map(e => e.file),
-      representative,
-      fieldSet,
-      titleCluster: representative.titleCluster,
-    });
-  }
-
-  // Use first match for display info (or current entry)
-  const displayEntry = matches[0] ?? currentEntry;
-
-  return {
-    displayTitle: displayEntry.fields.title ?? '(untitled)',
-    displayAuthor: displayEntry.fields.author ?? displayEntry.fields.editor ?? '(unknown)',
-    year: displayEntry.fields.year,
-    doi: displayEntry.doi ?? currentEntry.doi,
-    entries: allEntries,
-    variants,
-  };
-}
-
-/**
- * Compute a key that identifies a variant
- * Same key = same variant (modulo file)
- */
-function computeVariantKey(entry: IndexedEntry): string {
-  // Variant key includes:
-  // - Normalized title with braces (titleCluster)
-  // - Sorted list of fields present
-
-  const fieldList = Object.keys(entry.fields).sort().join(',');
-  return `${entry.titleCluster}|${fieldList}`;
+  return titleSim >= threshold && authorSim >= threshold;
 }
 
 /**
@@ -152,64 +93,225 @@ function levenshteinDistance(a: string, b: string): number {
   return prev[n];
 }
 
+// ── Quality scoring ──────────────────────────────────────────────
+
 /**
- * Compare two entries and return the fields that differ
+ * Compute a quality score for an entry (higher = better).
+ * Used to determine which entry seeds a super card.
  */
-export function compareFields(
-  current: IndexedEntry,
-  other: IndexedEntry
-): FieldComparison[] {
-  const comparisons: FieldComparison[] = [];
-  const allFields = new Set([
-    ...Object.keys(current.fields),
-    ...Object.keys(other.fields),
-  ]);
+export function computeQualityScore(entry: IndexedEntry): number {
+  let score = 0;
 
-  for (const field of allFields) {
-    const currentValue = current.fields[field];
-    const otherValue = other.fields[field];
+  // +1 point per field
+  score += Object.keys(entry.fields).length;
 
-    if (currentValue === otherValue) {
-      // Same value - no action needed
-      comparisons.push({
-        field,
-        current: currentValue,
-        other: otherValue,
-        status: 'same',
-      });
-    } else if (!currentValue && otherValue) {
-      // Missing in current, present in other
-      comparisons.push({
-        field,
-        current: undefined,
-        other: otherValue,
-        status: 'missing',
-      });
-    } else if (currentValue && !otherValue) {
-      // Present in current, missing in other
-      comparisons.push({
-        field,
-        current: currentValue,
-        other: undefined,
-        status: 'extra',
-      });
-    } else {
-      // Both have values but they differ
-      comparisons.push({
-        field,
-        current: currentValue,
-        other: otherValue,
-        status: 'different',
+  // +2 extra points for DOI
+  if (entry.fields.doi) {
+    score += 2;
+  }
+
+  // +1 extra point for URL
+  if (entry.fields.url) {
+    score += 1;
+  }
+
+  // +2 points for full first names (not just initials)
+  const creators = entry.creators?.author ?? entry.creators?.editor ?? [];
+  if (hasFullFirstNames(creators)) {
+    score += 2;
+  }
+
+  // +0.5 * year to prioritize newer versions
+  const year = parseInt(entry.fields.year ?? '', 10);
+  if (!isNaN(year)) {
+    score += 0.5 * year;
+  }
+
+  return score;
+}
+
+export function hasFullFirstNames(creators: { firstName?: string; literal?: string }[]): boolean {
+  if (creators.length === 0) return false;
+
+  for (const creator of creators) {
+    // Skip institutional names (literal)
+    if (creator.literal) continue;
+
+    const firstName = creator.firstName ?? '';
+    if (!firstName) return false;
+
+    // Check if firstName looks like initials only
+    const parts = firstName.split(/[\s.]+/).filter(p => p.length > 0);
+    const allInitials = parts.every(part => {
+      const cleaned = part.replace(/[{}]/g, '');
+      return cleaned.length <= 2;
+    });
+
+    if (allInitials) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// ── Super card merging ───────────────────────────────────────────
+
+/**
+ * Check if an entry's fields are compatible with a super card's fields.
+ * Compatible means: for every field present in both, values are identical.
+ */
+export function areFieldsCompatible(
+  cardFields: Record<string, string>,
+  entryFields: Record<string, string>
+): boolean {
+  for (const key of Object.keys(entryFields)) {
+    if (key in cardFields && cardFields[key] !== entryFields[key]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Build super cards from a list of entries by greedy merging.
+ * Entries are processed in quality-score order (best first).
+ * Compatible entries (no conflicting field values) are merged into a single card
+ * with the union of their fields.
+ */
+export function buildSuperCards(entries: IndexedEntry[]): SuperCard[] {
+  if (entries.length === 0) return [];
+
+  // Sort by quality score descending
+  const sorted = [...entries].sort(
+    (a, b) => computeQualityScore(b) - computeQualityScore(a)
+  );
+
+  const superCards: SuperCard[] = [];
+
+  for (const entry of sorted) {
+    let merged = false;
+
+    for (const card of superCards) {
+      // Only merge entries of the same BibTeX type.
+      if (card.entryType === entry.entryType && areFieldsCompatible(card.fields, entry.fields)) {
+        // Merge: add entry's unique fields to the card
+        for (const [key, value] of Object.entries(entry.fields)) {
+          if (!(key in card.fields)) {
+            card.fields[key] = value;
+          }
+        }
+        card.sourceEntries.push(entry);
+        merged = true;
+        break;
+      }
+    }
+
+    if (!merged) {
+      // Seed a new super card
+      superCards.push({
+        fields: { ...entry.fields },
+        entryType: entry.entryType,
+        key: entry.key,
+        creators: entry.creators,
+        sourceEntries: [entry],
+        qualityScore: computeQualityScore(entry),
       });
     }
   }
 
-  return comparisons;
+  return superCards;
 }
 
-export interface FieldComparison {
-  field: string;
-  current?: string;
-  other?: string;
-  status: 'same' | 'missing' | 'extra' | 'different';
+// ── Paper identity clustering ────────────────────────────────────
+
+/**
+ * Cluster entries by paper identity using union-find.
+ * Two entries are in the same cluster if they share a DOI or have
+ * title+author similarity >= threshold.
+ */
+export function clusterByPaperIdentity(
+  entries: IndexedEntry[],
+  threshold: number = 0.85
+): IndexedEntry[][] {
+  if (entries.length === 0) return [];
+
+  const n = entries.length;
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const rank = new Array(n).fill(0);
+
+  function find(x: number): number {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]]; // path compression
+      x = parent[x];
+    }
+    return x;
+  }
+
+  function union(x: number, y: number): void {
+    const rx = find(x);
+    const ry = find(y);
+    if (rx === ry) return;
+    if (rank[rx] < rank[ry]) { parent[rx] = ry; }
+    else if (rank[rx] > rank[ry]) { parent[ry] = rx; }
+    else { parent[ry] = rx; rank[rx]++; }
+  }
+
+  // First pass: group by DOI (O(n))
+  const doiMap = new Map<string, number>();
+  for (let i = 0; i < n; i++) {
+    const doi = entries[i].doi;
+    if (doi) {
+      const existing = doiMap.get(doi);
+      if (existing !== undefined) {
+        union(i, existing);
+      } else {
+        doiMap.set(doi, i);
+      }
+    }
+  }
+
+  // Second pass: pairwise title+author similarity (O(n^2))
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (find(i) === find(j)) continue; // already clustered
+      if (entriesMatch(entries[i], entries[j], threshold)) {
+        union(i, j);
+      }
+    }
+  }
+
+  // Collect clusters
+  const clusters = new Map<number, IndexedEntry[]>();
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    const cluster = clusters.get(root) ?? [];
+    cluster.push(entries[i]);
+    clusters.set(root, cluster);
+  }
+
+  return Array.from(clusters.values());
+}
+
+/**
+ * Top-level: cluster entries by paper identity, then build super cards within each cluster.
+ */
+export function buildPaperClusters(
+  entries: IndexedEntry[],
+  threshold: number = 0.85
+): PaperCluster[] {
+  const clusters = clusterByPaperIdentity(entries, threshold);
+
+  return clusters.map(clusterEntries => {
+    const superCards = buildSuperCards(clusterEntries);
+    const best = superCards[0]; // highest quality score
+    return {
+      displayTitle: best.fields.title ?? '(untitled)',
+      displayAuthor: best.fields.author ?? best.fields.editor ?? '(unknown)',
+      year: best.fields.year,
+      doi: clusterEntries.find(e => e.doi)?.doi,
+      superCards,
+      totalEntries: clusterEntries.length,
+    };
+  });
 }

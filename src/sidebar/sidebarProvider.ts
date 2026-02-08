@@ -5,8 +5,8 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { BibIndexManager } from '../index';
-import { IndexedEntry } from '../types';
-import { findMatches } from '../matching';
+import { IndexedEntry, SuperCard } from '../types';
+import { findMatches, buildSuperCards, buildPaperClusters, computeQualityScore } from '../matching';
 import { normalizeForFilter, parseBibFile } from '../parser';
 import { CANONICAL_FIELD_ORDER } from '../types';
 import { findEntryInsertionPoint, formatBibtex, determineBlankLines } from '../insertion';
@@ -61,8 +61,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             await this.handleInsertField(message.file, message.key, message.field);
             break;
 
+          case 'insertFieldValue':
+            await this.handleInsertFieldValue(message.field, message.value);
+            break;
+
           case 'insertEntry':
             await this.handleInsertEntry(message.file, message.key);
+            break;
+
+          case 'copySuperCard':
+            await this.handleCopySuperCard(message.fields, message.entryType, message.key);
+            break;
+
+          case 'insertSuperCard':
+            await this.handleInsertSuperCard(message.fields, message.entryType, message.key);
             break;
 
           case 'showManageFiles':
@@ -326,7 +338,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     // Now apply precise matching on the pre-filtered candidates
     const matches = findMatches(this.currentEntry, allCandidates, threshold);
-    const displayMatches = this.prepareMatchesForDisplay(this.currentEntry, matches);
+
+    // Build super cards from matches (greedy merge of compatible entries)
+    const superCards = buildSuperCards(matches);
+    const displayMatches = superCards.map(card =>
+      this.formatSuperCardForDisplay(card, this.currentEntry)
+    );
 
     this._view.webview.postMessage({
       command: 'matches',
@@ -409,59 +426,47 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     results.sort((a, b) => b.score - a.score);
 
-    // Cluster identical entries together
-    const clustered = this.clusterSearchResults(results);
-    const topClusters = clustered.slice(0, 50);
+    // Build a score map for sorting clusters by search relevance
+    const scoreMap = new Map<IndexedEntry, number>();
+    for (const r of results) {
+      scoreMap.set(r.entry, r.score);
+    }
 
-    const displayResults = topClusters.map(cluster =>
-      this.formatEntryForDisplay(
-        cluster.representative,
-        this.currentEntry,
-        cluster.entries.length,
-        cluster.entries.map(e => ({ file: e.entry.file, key: e.entry.key }))
-      )
-    );
+    // Cluster by paper identity, then build super cards within each cluster
+    const config = vscode.workspace.getConfiguration('tooManyBibs');
+    const threshold = config.get<number>('similarityThreshold') ?? 0.85;
+    const paperClusters = buildPaperClusters(results.map(r => r.entry), threshold);
+
+    // Sort clusters by best search relevance score, then quality score
+    paperClusters.sort((a, b) => {
+      const aScore = Math.max(...a.superCards.flatMap(sc => sc.sourceEntries.map(e => scoreMap.get(e) ?? 0)));
+      const bScore = Math.max(...b.superCards.flatMap(sc => sc.sourceEntries.map(e => scoreMap.get(e) ?? 0)));
+      if (bScore !== aScore) return bScore - aScore;
+      return (b.superCards[0]?.qualityScore ?? 0) - (a.superCards[0]?.qualityScore ?? 0);
+    });
+
+    // Flatten clusters into display entries with cluster boundaries
+    const displayResults: DisplayEntry[] = [];
+    let clusterId = 0;
+    for (const cluster of paperClusters) {
+      if (displayResults.length >= 50) break;
+      let isFirst = true;
+      for (const card of cluster.superCards) {
+        if (displayResults.length >= 50) break;
+        const entry = this.formatSuperCardForDisplay(card, this.currentEntry);
+        entry.clusterId = clusterId;
+        entry.isFirstInCluster = isFirst;
+        displayResults.push(entry);
+        isFirst = false;
+      }
+      clusterId++;
+    }
 
     this._view.webview.postMessage({
       command: 'searchResults',
       results: displayResults,
       canInsert: this.isCurrentEditorBibFile(),
     });
-  }
-
-  private clusterSearchResults(
-    results: { entry: IndexedEntry; score: number }[]
-  ): { representative: IndexedEntry; entries: { entry: IndexedEntry; score: number }[]; bestScore: number; qualityScore: number }[] {
-    const grouped = new Map<string, { entry: IndexedEntry; score: number }[]>();
-
-    for (const result of results) {
-      // Group by title, author, and field content
-      const fieldHash = this.computeFieldHash(result.entry.fields);
-      const key = `${result.entry.titleFilter}\x00${result.entry.authorNorm}\x00${fieldHash}`;
-      const existing = grouped.get(key) ?? [];
-      existing.push(result);
-      grouped.set(key, existing);
-    }
-
-    const clusters: { representative: IndexedEntry; entries: { entry: IndexedEntry; score: number }[]; bestScore: number; qualityScore: number }[] = [];
-
-    for (const entries of grouped.values()) {
-      // Use highest-scoring entry as representative
-      const bestScore = Math.max(...entries.map(e => e.score));
-      const representative = entries.find(e => e.score === bestScore)!.entry;
-      const qualityScore = this.computeQualityScore(representative);
-      clusters.push({ representative, entries, bestScore, qualityScore });
-    }
-
-    // Sort clusters by relevance score (primary), then quality score (secondary)
-    clusters.sort((a, b) => {
-      if (b.bestScore !== a.bestScore) {
-        return b.bestScore - a.bestScore;
-      }
-      return b.qualityScore - a.qualityScore;
-    });
-
-    return clusters;
   }
 
   private parseSearchQuery(query: string): { exactPhrases: string[]; terms: string[] } {
@@ -483,73 +488,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     terms.push(...splitTerms);
 
     return { exactPhrases, terms };
-  }
-
-  /**
-   * Calculate a quality score for an entry (used for secondary sorting)
-   * Higher score = better quality entry
-   */
-  private computeQualityScore(entry: IndexedEntry): number {
-    let score = 0;
-
-    // +1 point per field
-    score += Object.keys(entry.fields).length;
-
-    // +2 extra points for DOI
-    if (entry.fields.doi) {
-      score += 2;
-    }
-
-    // +1 extra point for URL
-    if (entry.fields.url) {
-      score += 1;
-    }
-
-    // +2 points for full first names (not just initials)
-    const creators = entry.creators?.author ?? entry.creators?.editor ?? [];
-    if (this.hasFullFirstNames(creators)) {
-      score += 2;
-    }
-
-    // +0.5 * year to prioritize newer versions
-    const year = parseInt(entry.fields.year ?? '', 10);
-    if (!isNaN(year)) {
-      score += 0.5 * year;
-    }
-
-    return score;
-  }
-
-  private hasFullFirstNames(creators: { firstName?: string; literal?: string }[]): boolean {
-    // Check if creators have full first names rather than just initials
-    // Returns true if ALL authors have full first names
-
-    if (creators.length === 0) return false;
-
-    for (const creator of creators) {
-      // Skip institutional names (literal)
-      if (creator.literal) continue;
-
-      const firstName = creator.firstName ?? '';
-      if (!firstName) return false;
-
-      // Check if firstName looks like initials only
-      // Initials: "J.", "J. K.", "J.K.", single letters
-      // Full names: "John", "John Kenneth"
-      const parts = firstName.split(/[\s.]+/).filter(p => p.length > 0);
-
-      // If all parts are single letters or very short, it's initials
-      const allInitials = parts.every(part => {
-        const cleaned = part.replace(/[{}]/g, '');
-        return cleaned.length <= 2;
-      });
-
-      if (allInitials) {
-        return false;
-      }
-    }
-
-    return true;
   }
 
   /**
@@ -582,44 +520,79 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     return true;
   }
 
-  private prepareMatchesForDisplay(
-    currentEntry: IndexedEntry,
-    matches: IndexedEntry[]
-  ): DisplayEntry[] {
-    const grouped = new Map<string, IndexedEntry[]>();
+  private formatSuperCardForDisplay(
+    card: SuperCard,
+    currentEntry?: IndexedEntry | null
+  ): DisplayEntry {
+    const allFiles = card.sourceEntries.map(e => ({ file: e.file, key: e.key }));
+    const fields: DisplayField[] = [];
 
-    for (const match of matches) {
-      // Group by title, author, AND field values so entries with different content are shown separately
-      const fieldHash = this.computeFieldHash(match.fields);
-      const key = `${match.titleFilter}\x00${match.authorNorm}\x00${fieldHash}`;
-      const existing = grouped.get(key) ?? [];
-      existing.push(match);
-      grouped.set(key, existing);
+    const allFieldNames = new Set([
+      ...Object.keys(card.fields),
+      ...(currentEntry ? Object.keys(currentEntry.fields) : []),
+    ]);
+
+    for (const fieldName of allFieldNames) {
+      const theirValue = card.fields[fieldName];
+      const yourValue = currentEntry?.fields[fieldName];
+
+      let status: 'same' | 'only-theirs' | 'only-yours' | 'different' = 'same';
+      let displayValue = theirValue ?? '';
+      let diffHtml: string | null = null;
+
+      if (!yourValue && theirValue) {
+        status = 'only-theirs';
+      } else if (yourValue && !theirValue) {
+        status = 'only-yours';
+      } else if (yourValue !== theirValue && yourValue && theirValue) {
+        if ((fieldName === 'author' || fieldName === 'editor') && currentEntry) {
+          const theirCreators = card.creators?.[fieldName as 'author' | 'editor'];
+          const yourCreators = currentEntry.creators?.[fieldName as 'author' | 'editor'];
+          if (theirCreators && yourCreators && this.creatorsEqual(theirCreators, yourCreators)) {
+            status = 'same';
+          } else {
+            status = 'different';
+            diffHtml = this.computeInlineDiff(yourValue, theirValue);
+          }
+        } else {
+          status = 'different';
+          diffHtml = this.computeInlineDiff(yourValue, theirValue);
+        }
+      }
+
+      fields.push({
+        name: fieldName,
+        value: displayValue,
+        status,
+        canCopy: status === 'only-theirs' || status === 'different',
+        diffHtml,
+      });
     }
 
-    // Build display entries with quality scores for sorting
-    const entriesWithScores: { entry: DisplayEntry; qualityScore: number }[] = [];
+    fields.sort((a, b) => {
+      const aIdx = CANONICAL_FIELD_ORDER.indexOf(a.name);
+      const bIdx = CANONICAL_FIELD_ORDER.indexOf(b.name);
+      const aOrder = aIdx === -1 ? 999 : aIdx;
+      const bOrder = bIdx === -1 ? 999 : bIdx;
+      return aOrder - bOrder;
+    });
 
-    for (const [, entries] of grouped) {
-      const rep = entries[0];
-      const allFiles = entries.map(e => ({ file: e.file, key: e.key }));
-      const displayEntry = this.formatEntryForDisplay(rep, currentEntry, entries.length, allFiles);
-      const qualityScore = this.computeQualityScore(rep);
-      entriesWithScores.push({ entry: displayEntry, qualityScore });
-    }
+    // Serialize merged fields for copy/insert of the super card
+    const mergedFieldsJson = JSON.stringify(card.fields);
 
-    // Sort by quality score (higher is better)
-    entriesWithScores.sort((a, b) => b.qualityScore - a.qualityScore);
-
-    return entriesWithScores.map(e => e.entry);
-  }
-
-  private computeFieldHash(fields: Record<string, string>): string {
-    // Create a simple hash from sorted field names and values
-    // Use \x00 as delimiter to avoid collisions with field content
-    const sortedKeys = Object.keys(fields).sort();
-    const parts = sortedKeys.map(k => `${k}\x00${fields[k]}`);
-    return parts.join('\x00');
+    return {
+      key: card.key,
+      file: card.sourceEntries[0].file,
+      fileName: path.basename(card.sourceEntries[0].file),
+      fileCount: card.sourceEntries.length,
+      allFiles,
+      entryType: card.entryType,
+      title: card.fields.title ?? '(untitled)',
+      author: card.fields.author ?? card.fields.editor ?? '',
+      year: card.fields.year ?? '',
+      fields,
+      mergedFields: mergedFieldsJson,
+    };
   }
 
   private formatEntryForDisplay(
@@ -835,6 +808,126 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
     vscode.window.showInformationMessage(`Inserted @${entry.entryType}{${entry.key}}`);
+  }
+
+  async handleInsertFieldValue(field: string, value: string): Promise<void> {
+    if (!this.currentEditor || !this.currentEntry) return;
+    if (!value) return;
+
+    const document = this.currentEditor.document;
+    const content = document.getText();
+    const lines = content.split('\n');
+
+    const entryStart = this.currentEntry.startLine - 1;
+    const entryEnd = this.currentEntry.endLine - 1;
+
+    const indent = this.detectFieldIndentation(lines, entryStart, entryEnd);
+
+    const fieldRegex = new RegExp(`^\\s*${field}\\s*=`, 'i');
+    let existingFieldLine = -1;
+
+    for (let i = entryStart; i <= entryEnd; i++) {
+      if (fieldRegex.test(lines[i])) {
+        existingFieldLine = i;
+        break;
+      }
+    }
+
+    const edit = new vscode.WorkspaceEdit();
+    const fieldLine = `${indent}${field} = {${value}},`;
+
+    if (existingFieldLine >= 0) {
+      const existingFieldEndLine = this.findExistingFieldEndLine(lines, existingFieldLine, entryEnd);
+      const lineRange = new vscode.Range(
+        existingFieldLine, 0,
+        existingFieldEndLine, lines[existingFieldEndLine].length
+      );
+      edit.replace(document.uri, lineRange, fieldLine);
+    } else {
+      const insertInfo = this.findInsertionPoint(lines, entryStart, entryEnd, field);
+
+      if (insertInfo.needsComma && insertInfo.previousFieldLine >= 0) {
+        const prevLine = lines[insertInfo.previousFieldLine];
+        const trimmed = prevLine.trimEnd();
+        if (!trimmed.endsWith(',')) {
+          const commaRange = new vscode.Range(
+            insertInfo.previousFieldLine, trimmed.length,
+            insertInfo.previousFieldLine, prevLine.length
+          );
+          edit.replace(document.uri, commaRange, ',');
+        }
+      }
+
+      const insertPos = new vscode.Position(insertInfo.line, 0);
+      edit.insert(document.uri, insertPos, fieldLine + '\n');
+    }
+
+    const applied = await vscode.workspace.applyEdit(edit);
+    if (!applied) {
+      vscode.window.showErrorMessage(`Failed to insert ${field}`);
+      return;
+    }
+    vscode.window.showInformationMessage(`Inserted ${field}`);
+  }
+
+  private buildSyntheticEntry(fields: Record<string, string>, entryType: string, key: string): IndexedEntry {
+    return {
+      file: '',
+      key,
+      entryType,
+      startLine: 0,
+      endLine: 0,
+      fields,
+      creators: {},
+      titleFilter: '',
+      titleCluster: '',
+      authorNorm: '',
+    };
+  }
+
+  private async handleCopySuperCard(fields: Record<string, string>, entryType: string, key: string): Promise<void> {
+    const synthetic = this.buildSyntheticEntry(fields, entryType, key);
+    const bibtex = formatBibtex(synthetic);
+    await vscode.env.clipboard.writeText(bibtex);
+  }
+
+  private async handleInsertSuperCard(fields: Record<string, string>, entryType: string, key: string): Promise<void> {
+    const editor = this.currentEditor ?? vscode.window.activeTextEditor;
+    if (!editor) {
+      vscode.window.showErrorMessage('No active editor to insert entry into');
+      return;
+    }
+
+    const synthetic = this.buildSyntheticEntry(fields, entryType, key);
+    const document = editor.document;
+    const content = document.getText();
+    const lines = content.split('\n');
+
+    const insertLine = findEntryInsertionPoint(lines, this.currentEntry);
+    const bibtex = formatBibtex(synthetic);
+    const edit = new vscode.WorkspaceEdit();
+
+    const { needsBlankBefore, needsBlankAfter } = determineBlankLines(lines, insertLine);
+
+    let textToInsert = '';
+    if (needsBlankBefore) {
+      textToInsert += '\n';
+    }
+    textToInsert += bibtex;
+    if (needsBlankAfter) {
+      textToInsert += '\n';
+    }
+    textToInsert += '\n';
+
+    const insertPos = new vscode.Position(insertLine, 0);
+    edit.insert(document.uri, insertPos, textToInsert);
+
+    const applied = await vscode.workspace.applyEdit(edit);
+    if (!applied) {
+      vscode.window.showErrorMessage(`Failed to insert @${entryType}{${key}}`);
+      return;
+    }
+    vscode.window.showInformationMessage(`Inserted @${entryType}{${key}}`);
   }
 
   private findExistingFieldEndLine(lines: string[], fieldStart: number, entryEnd: number): number {
@@ -1062,6 +1155,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     .progress-text.active {
       display: inline-flex;
+    }
+
+    .cluster-separator {
+      border-top: 2px solid var(--vscode-panel-border);
+      margin: 16px 0 10px;
     }
 
     .entry-card {
@@ -1756,7 +1854,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       }
 
       let html = '<div class="section-header">Search results</div>';
-      results.forEach(entry => {
+      results.forEach((entry, index) => {
+        if (entry.isFirstInCluster && index > 0) {
+          html += '<div class="cluster-separator"></div>';
+        }
         html += renderEntryCard(entry, false, canInsert);
       });
 
@@ -1800,19 +1901,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
           if (showFieldComparison) {
             // Edit mode: show comparison styling and insert buttons
+            var insertBtnAttrs;
+            if (entry.mergedFields) {
+              // Super card: use insertFieldValue with the value directly
+              insertBtnAttrs = 'data-action="insertFieldValue" data-field="' +
+                escapeHtml(field.name) + '" data-value="' +
+                escapeHtml(field.value).replace(/"/g, '&quot;') + '"';
+            } else {
+              insertBtnAttrs = 'data-action="insert" data-file="' +
+                escapeHtml(entry.file) + '" data-key="' + escapeHtml(entry.key) +
+                '" data-field="' + escapeHtml(field.name) + '"';
+            }
             if (field.status === 'only-yours') {
               html += '<span class="field-value only-yours">[none]</span>';
               html += '<span class="field-action"></span>';
             } else if (field.status === 'only-theirs') {
               html += renderFieldValue(field.value, 'only-theirs', field.name);
-              html += '<span class="field-action"><button data-action="insert" data-file="' +
-                escapeHtml(entry.file) + '" data-key="' + escapeHtml(entry.key) +
-                '" data-field="' + escapeHtml(field.name) + '">→</button></span>';
+              html += '<span class="field-action"><button ' + insertBtnAttrs + '>→</button></span>';
             } else if (field.status === 'different' && field.diffHtml) {
               html += '<span class="field-value">' + field.diffHtml + '</span>';
-              html += '<span class="field-action"><button data-action="insert" data-file="' +
-                escapeHtml(entry.file) + '" data-key="' + escapeHtml(entry.key) +
-                '" data-field="' + escapeHtml(field.name) + '">→</button></span>';
+              html += '<span class="field-action"><button ' + insertBtnAttrs + '>→</button></span>';
             } else {
               html += renderFieldValue(field.value, '', field.name);
               html += '<span class="field-action"></span>';
@@ -1829,11 +1937,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       }
 
       html += '<div class="entry-actions">';
-      html += '<button data-action="copy" data-file="' + escapeHtml(entry.file) +
-        '" data-key="' + escapeHtml(entry.key) + '">Copy entry</button>';
-      if (showFieldComparison || canInsertEntry) {
-        html += ' <button data-action="insertEntry" data-file="' + escapeHtml(entry.file) +
-          '" data-key="' + escapeHtml(entry.key) + '" title="Insert entry into current file">→</button>';
+      if (entry.mergedFields) {
+        // Super card: copy/insert the merged entry
+        html += '<button data-action="copySuperCard" data-entry-type="' + escapeHtml(entry.entryType) +
+          '" data-key="' + escapeHtml(entry.key) +
+          '" data-merged-fields="' + escapeHtml(entry.mergedFields).replace(/"/g, '&quot;') + '">Copy entry</button>';
+        if (showFieldComparison || canInsertEntry) {
+          html += ' <button data-action="insertSuperCard" data-entry-type="' + escapeHtml(entry.entryType) +
+            '" data-key="' + escapeHtml(entry.key) +
+            '" data-merged-fields="' + escapeHtml(entry.mergedFields).replace(/"/g, '&quot;') +
+            '" title="Insert merged entry into current file">→</button>';
+        }
+      } else {
+        html += '<button data-action="copy" data-file="' + escapeHtml(entry.file) +
+          '" data-key="' + escapeHtml(entry.key) + '">Copy entry</button>';
+        if (showFieldComparison || canInsertEntry) {
+          html += ' <button data-action="insertEntry" data-file="' + escapeHtml(entry.file) +
+            '" data-key="' + escapeHtml(entry.key) + '" title="Insert entry into current file">→</button>';
+        }
       }
       html += '</div>';
 
@@ -2056,6 +2177,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ command: 'insertField', file, key, field });
           } else if (action === 'insertEntry') {
             vscode.postMessage({ command: 'insertEntry', file, key });
+          } else if (action === 'insertFieldValue') {
+            vscode.postMessage({ command: 'insertFieldValue', field, value: btn.dataset.value });
+          } else if (action === 'copySuperCard') {
+            const fields = JSON.parse(btn.dataset.mergedFields);
+            vscode.postMessage({ command: 'copySuperCard', fields, entryType: btn.dataset.entryType, key });
+            showCopyFeedback(btn);
+          } else if (action === 'insertSuperCard') {
+            const fields = JSON.parse(btn.dataset.mergedFields);
+            vscode.postMessage({ command: 'insertSuperCard', fields, entryType: btn.dataset.entryType, key });
           }
         });
       });
@@ -2129,6 +2259,9 @@ interface DisplayEntry {
   author: string;
   year: string;
   fields: DisplayField[];
+  mergedFields?: string;        // JSON of merged fields for super card copy/insert
+  clusterId?: number;           // For cluster boundary rendering in search results
+  isFirstInCluster?: boolean;   // First card in a cluster
 }
 
 interface DisplayField {

@@ -63,35 +63,28 @@ export interface BibIndex {
 }
 
 /**
- * A cluster of similar entries (same bibliographic work across files)
+ * A merged "super card": the union of compatible entries within a cluster.
+ * Two entries are compatible if every field they both have has identical values.
  */
-export interface EntryCluster {
-  // Representative info for display
+export interface SuperCard {
+  fields: Record<string, string>;       // Union of merged fields
+  entryType: string;                    // From seed entry
+  key: string;                          // From seed entry
+  creators: { author?: ParsedName[]; editor?: ParsedName[] };
+  sourceEntries: IndexedEntry[];        // All contributing entries (seed first)
+  qualityScore: number;
+}
+
+/**
+ * A cluster of entries representing the same paper, containing one or more super cards.
+ */
+export interface PaperCluster {
   displayTitle: string;
   displayAuthor: string;
   year?: string;
   doi?: string;
-
-  // All entries in this cluster
-  entries: IndexedEntry[];
-
-  // Distinct variants (entries with different field sets or brace usage)
-  variants: EntryVariant[];
-}
-
-/**
- * A variant within a cluster (distinct version of the same work)
- */
-export interface EntryVariant {
-  // Which files contain this exact variant
-  files: string[];
-
-  // Representative entry (one of the files)
-  representative: IndexedEntry;
-
-  // What makes this variant distinct
-  fieldSet: string[];     // Sorted list of field names
-  titleCluster: string;   // Normalized title with braces preserved
+  superCards: SuperCard[];
+  totalEntries: number;
 }
 
 /**
