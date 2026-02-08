@@ -82,6 +82,18 @@ function setCursor(editor: vscode.TextEditor, line: number, character = 0): void
   editor.selection = new vscode.Selection(pos, pos);
 }
 
+async function activateExtensionForEditorFeatures(): Promise<void> {
+  const extension = vscode.extensions.all.find(ext => ext.packageJSON?.name === 'too-many-bibs');
+  assert.ok(extension, 'Too Many Bibs extension should be available in integration tests');
+  if (!extension!.isActive) {
+    await extension!.activate();
+  }
+}
+
+function linkTargetToString(link: vscode.DocumentLink): string {
+  return link.target?.toString() ?? '';
+}
+
 suite('Integration: BibIndexManager with real files', () => {
   let indexManager: BibIndexManager;
   let storageDir: string;
@@ -537,5 +549,77 @@ suite('Integration: Search via index', () => {
     const files = results.filter(e => e.key === 'nash1950equilibrium').map(e => e.file);
     assert.ok(files.some(f => f.endsWith('sample.bib')), 'Should find Nash in sample.bib');
     assert.ok(files.some(f => f.endsWith('sample2.bib')), 'Should find Nash in sample2.bib');
+  });
+});
+
+suite('Integration: Editor links', () => {
+  setup(async () => {
+    await activateExtensionForEditorFeatures();
+  });
+
+  teardown(async () => {
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+  });
+
+  test('should provide links for valid URL, DOI, and arXiv fields only', async () => {
+    const tempDir = createTempDir();
+    const filePath = writeBibFile(tempDir, 'links.bib', `@article{links,
+  url = {https://example.com/paper},
+  doi = {10.1000/xyz123},
+  archivePrefix = {arXiv},
+  eprint = {1611.08826},
+  eprint = {1701.00001},
+  archivePrefix = {arXiv},
+  url = {www.example.com/no-scheme},
+  doi = {not-a-doi},
+  archivePrefix = {arXiv},
+  year = {2016},
+  eprint = {1701.00001},
+  eprint = {1801.00001},
+  year = {2018},
+  archivePrefix = {arXiv},
+  doi = "10.1000/valid" # suffix,
+}`);
+
+    const doc = await vscode.workspace.openTextDocument(filePath);
+    await vscode.window.showTextDocument(doc);
+
+    const links = await vscode.commands.executeCommand<vscode.DocumentLink[]>(
+      'vscode.executeLinkProvider',
+      doc.uri
+    );
+
+    const linkTargets = (links ?? []).map(linkTargetToString);
+    assert.ok(linkTargets.includes('https://example.com/paper'), 'Expected valid URL link');
+    assert.ok(linkTargets.includes('https://doi.org/10.1000/xyz123'), 'Expected canonical DOI link');
+    assert.ok(linkTargets.includes('https://arxiv.org/abs/1611.08826'), 'Expected arXiv link');
+    assert.ok(linkTargets.includes('https://arxiv.org/abs/1701.00001'), 'Expected reverse-order arXiv link');
+    assert.ok(!linkTargets.includes('www.example.com/no-scheme'), 'Invalid URL should not be linked');
+    assert.ok(!linkTargets.includes('https://doi.org/not-a-doi'), 'Invalid DOI should not be linked');
+    assert.ok(!linkTargets.includes('https://arxiv.org/abs/1801.00001'), 'Non-adjacent reverse-order eprint should not be linked');
+    assert.strictEqual(linkTargets.length, 4, `Expected exactly 4 links, got ${linkTargets.length}`);
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test('should provide links for untitled bibtex documents', async () => {
+    const doc = await vscode.workspace.openTextDocument({
+      language: 'bibtex',
+      content: `@article{untitled,
+  doi = {10.5555/12345678}
+}`,
+    });
+    await vscode.window.showTextDocument(doc);
+
+    const links = await vscode.commands.executeCommand<vscode.DocumentLink[]>(
+      'vscode.executeLinkProvider',
+      doc.uri
+    );
+    const linkTargets = (links ?? []).map(linkTargetToString);
+
+    assert.ok(
+      linkTargets.includes('https://doi.org/10.5555/12345678'),
+      'Expected DOI link in untitled bibtex document'
+    );
   });
 });

@@ -5,6 +5,7 @@
 import * as vscode from 'vscode';
 import { BibIndexManager } from './index';
 import { SidebarProvider } from './sidebar/sidebarProvider';
+import { BibDocumentLinkProvider } from './editorLinks';
 
 let indexManager: BibIndexManager;
 let outputChannel: vscode.OutputChannel;
@@ -94,6 +95,17 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Start file system watcher for .bib files
   context.subscriptions.push(indexManager.startWatching());
+
+  // Register clickable URL/DOI links inside BibTeX editors
+  context.subscriptions.push(
+    vscode.languages.registerDocumentLinkProvider(
+      [
+        { language: 'bibtex', scheme: 'file' },
+        { language: 'bibtex', scheme: 'untitled' },
+      ],
+      new BibDocumentLinkProvider()
+    )
+  );
 
   // Listen for cursor position changes
   context.subscriptions.push(

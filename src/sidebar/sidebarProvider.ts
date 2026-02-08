@@ -11,6 +11,7 @@ import { normalizeForFilter, parseBibFile } from '../parser';
 import { CANONICAL_FIELD_ORDER } from '../types';
 import { findEntryInsertionPoint, formatBibtex, determineBlankLines, formatFieldValue } from '../insertion';
 import { computeDiff } from '../diff';
+import { normalizeArxivValue, normalizeDoiValue, normalizeUrlValue } from '../editorLinks';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
@@ -128,6 +129,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             await this.handleOpenFile(message.file, message.line);
             break;
 
+          case 'openExternal':
+            await this.handleOpenExternal(message.url);
+            break;
+
           case 'ready':
             this.sendStatus();
             this.updateMatches();
@@ -153,6 +158,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       }
     } catch (error) {
       vscode.window.showErrorMessage(`Could not open file: ${filePath}`);
+    }
+  }
+
+  private async handleOpenExternal(url: string): Promise<void> {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return;
+      }
+      await vscode.env.openExternal(vscode.Uri.parse(url));
+    } catch {
+      // Ignore invalid external URL requests from the webview
     }
   }
 
@@ -538,12 +555,63 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     return true;
   }
 
+  private computeFieldLinkTargets(fields: Record<string, string>): Record<string, string> {
+    const targets: Record<string, string> = {};
+    const entries = Object.entries(fields);
+    const archivePrefixValue = this.findFieldValueCaseInsensitive(fields, 'archiveprefix');
+    const hasArxivPrefix = archivePrefixValue?.trim().toLowerCase() === 'arxiv';
+
+    for (let i = 0; i < entries.length; i++) {
+      const [fieldName, fieldValue] = entries[i];
+      const fieldLower = fieldName.toLowerCase();
+
+      if (fieldLower === 'url') {
+        const target = normalizeUrlValue(fieldValue);
+        if (target) {
+          targets[fieldName] = target;
+        }
+        continue;
+      }
+
+      if (fieldLower === 'doi') {
+        const target = normalizeDoiValue(fieldValue);
+        if (target) {
+          targets[fieldName] = target;
+        }
+        continue;
+      }
+
+      if (fieldLower === 'eprint') {
+        if (!hasArxivPrefix) {
+          continue;
+        }
+
+        const target = normalizeArxivValue(fieldValue);
+        if (target) {
+          targets[fieldName] = target;
+        }
+      }
+    }
+
+    return targets;
+  }
+
+  private findFieldValueCaseInsensitive(fields: Record<string, string>, fieldName: string): string | undefined {
+    for (const [name, value] of Object.entries(fields)) {
+      if (name.toLowerCase() === fieldName.toLowerCase()) {
+        return value;
+      }
+    }
+    return undefined;
+  }
+
   private formatSuperCardForDisplay(
     card: SuperCard,
     currentEntry?: IndexedEntry | null
   ): DisplayEntry {
     const allFiles = card.sourceEntries.map(e => ({ file: e.file, key: e.key }));
     const fields: DisplayField[] = [];
+    const linkTargets = this.computeFieldLinkTargets(card.fields);
 
     const allFieldNames = new Set([
       ...Object.keys(card.fields),
@@ -584,6 +652,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         status,
         canCopy: status === 'only-theirs' || status === 'different',
         diffHtml,
+        linkTarget: linkTargets[fieldName],
       });
     }
 
@@ -620,6 +689,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     allFiles: { file: string; key: string }[] = []
   ): DisplayEntry {
     const fields: DisplayField[] = [];
+    const linkTargets = this.computeFieldLinkTargets(entry.fields);
 
     const allFieldNames = new Set([
       ...Object.keys(entry.fields),
@@ -662,6 +732,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         status,
         canCopy: status === 'only-theirs' || status === 'different',
         diffHtml,
+        linkTarget: linkTargets[fieldName],
       });
     }
 
@@ -1264,6 +1335,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     .field-value mark {
       background: var(--vscode-diffEditor-insertedTextBackground, rgba(0,200,0,0.3));
       color: inherit;
+    }
+
+    .field-link {
+      color: var(--vscode-textLink-foreground);
+      text-decoration: underline;
+      cursor: pointer;
+      word-break: break-word;
+    }
+
+    .field-link:hover {
+      color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
     }
 
     .field-action {
@@ -1939,18 +2021,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
               html += '<span class="field-value only-yours">[none]</span>';
               html += '<span class="field-action"></span>';
             } else if (field.status === 'only-theirs') {
-              html += renderFieldValue(field.value, 'only-theirs', field.name);
+              html += renderFieldValue(field.value, 'only-theirs', field.name, field.linkTarget);
               html += '<span class="field-action"><button ' + insertBtnAttrs + '>→</button></span>';
             } else if (field.status === 'different' && field.diffHtml) {
               html += '<span class="field-value">' + field.diffHtml + '</span>';
               html += '<span class="field-action"><button ' + insertBtnAttrs + '>→</button></span>';
             } else {
-              html += renderFieldValue(field.value, '', field.name);
+              html += renderFieldValue(field.value, '', field.name, field.linkTarget);
               html += '<span class="field-action"></span>';
             }
           } else {
             // Search mode: just show field values without comparison styling
-            html += renderFieldValue(field.value, '', field.name);
+            html += renderFieldValue(field.value, '', field.name, field.linkTarget);
             html += '<span class="field-action"></span>';
           }
 
@@ -1985,15 +2067,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       return html;
     }
 
-    function renderFieldValue(value, cssClass, fieldName) {
+    function renderFieldValue(value, cssClass, fieldName, linkTarget) {
       const id = 'fv-' + Math.random().toString(36).substr(2, 9);
+      const renderedValue = linkTarget
+        ? '<a href="#" class="field-link" data-url="' + escapeHtml(linkTarget).replace(/"/g, '&quot;') +
+          '" title="' + escapeHtml(linkTarget).replace(/"/g, '&quot;') + '">' + escapeHtml(value) + '</a>'
+        : escapeHtml(value);
+
       if (value.length > MAX_VALUE_LENGTH) {
         const truncated = value.substring(0, MAX_VALUE_LENGTH);
+        if (linkTarget) {
+          return '<span class="field-value ' + cssClass + '" id="' + id + '">' +
+            '<a href="#" class="field-link" data-url="' + escapeHtml(linkTarget).replace(/"/g, '&quot;') +
+            '" title="' + escapeHtml(linkTarget).replace(/"/g, '&quot;') + '">' +
+            escapeHtml(truncated) + '...</a></span>';
+        }
         return '<span class="field-value ' + cssClass + '" id="' + id + '" data-full="' +
           escapeHtml(value).replace(/"/g, '&quot;') + '">' +
           escapeHtml(truncated) + '<span class="ellipsis" data-target="' + id + '">...</span></span>';
       }
-      return '<span class="field-value ' + cssClass + '">' + escapeHtml(value) + '</span>';
+      return '<span class="field-value ' + cssClass + '">' + renderedValue + '</span>';
     }
 
     function renderFileManagement(folders, filesByFolder) {
@@ -2233,6 +2326,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           }
         });
       });
+
+      content.querySelectorAll('.field-link').forEach(link => {
+        link.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (link.dataset.url) {
+            vscode.postMessage({ command: 'openExternal', url: link.dataset.url });
+          }
+        });
+      });
     }
 
     function showCopyFeedback(btn) {
@@ -2293,4 +2396,5 @@ interface DisplayField {
   status: 'same' | 'only-theirs' | 'only-yours' | 'different';
   canCopy: boolean;
   diffHtml: string | null;
+  linkTarget?: string;
 }
