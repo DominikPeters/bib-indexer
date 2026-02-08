@@ -250,6 +250,48 @@ suite('Entry Insertion Test Suite', () => {
       assert.ok(result.startsWith('@book{book2024,'));
     });
 
+    test('should keep concatenation expressions unwrapped', () => {
+      const entry: IndexedEntry = {
+        key: 'k',
+        entryType: 'inproceedings',
+        file: '/test/file.bib',
+        startLine: 1,
+        endLine: 3,
+        fields: {
+          title: 'Test',
+          booktitle: 'proc # {39th} # aaai',
+        },
+        creators: {},
+        titleFilter: 'test',
+        titleCluster: 'test',
+        authorNorm: '',
+      };
+
+      const result = formatBibtex(entry);
+      assert.ok(result.includes('booktitle = proc # {39th} # aaai,'));
+      assert.ok(!result.includes('booktitle = {proc # {39th} # aaai},'));
+    });
+
+    test('should still wrap plain values that contain # as text', () => {
+      const entry: IndexedEntry = {
+        key: 'k2',
+        entryType: 'article',
+        file: '/test/file.bib',
+        startLine: 1,
+        endLine: 3,
+        fields: {
+          title: 'C# tutorial',
+        },
+        creators: {},
+        titleFilter: 'c tutorial',
+        titleCluster: 'c tutorial',
+        authorNorm: '',
+      };
+
+      const result = formatBibtex(entry);
+      assert.ok(result.includes('title = {C# tutorial},'));
+    });
+
     test('should handle entry with no fields', () => {
       const entry: IndexedEntry = {
         key: 'empty',

@@ -9,7 +9,7 @@ import { IndexedEntry, SuperCard } from '../types';
 import { findMatches, buildSuperCards, buildPaperClusters, computeQualityScore } from '../matching';
 import { normalizeForFilter, parseBibFile } from '../parser';
 import { CANONICAL_FIELD_ORDER } from '../types';
-import { findEntryInsertionPoint, formatBibtex, determineBlankLines } from '../insertion';
+import { findEntryInsertionPoint, formatBibtex, determineBlankLines, formatFieldValue } from '../insertion';
 import { computeDiff } from '../diff';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
@@ -355,6 +355,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private handleSearch(query: string): void {
     if (!this._view) return;
 
+    const MAX_INITIAL_CANDIDATES = 500;
+    const MAX_CLUSTERING_CANDIDATES = 50;
+
     if (!query || query.length < 2) {
       this.updateMatches();
       return;
@@ -365,7 +368,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     // Use FlexSearch to get initial candidates
     const searchIndex = this.indexManager.getSearchIndex();
-    const candidates = searchIndex.search(query, 500);
+    const candidates = searchIndex.search(query, MAX_INITIAL_CANDIDATES);
 
     // Filter candidates and score them
     const results: { entry: IndexedEntry; score: number }[] = [];
@@ -426,29 +429,44 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     results.sort((a, b) => b.score - a.score);
 
+    // Clustering is O(n^2); limit to top-ranked entries for responsive typing.
+    const clusteringResults = results.slice(0, MAX_CLUSTERING_CANDIDATES);
+
     // Build a score map for sorting clusters by search relevance
     const scoreMap = new Map<IndexedEntry, number>();
-    for (const r of results) {
+    for (const r of clusteringResults) {
       scoreMap.set(r.entry, r.score);
     }
 
     // Cluster by paper identity, then build super cards within each cluster
     const config = vscode.workspace.getConfiguration('tooManyBibs');
     const threshold = config.get<number>('similarityThreshold') ?? 0.85;
-    const paperClusters = buildPaperClusters(results.map(r => r.entry), threshold);
+    const paperClusters = buildPaperClusters(clusteringResults.map(r => r.entry), threshold);
+
+    // Precompute each cluster's best relevance once before sorting.
+    const clusterRanks: { cluster: typeof paperClusters[number]; bestScore: number }[] = [];
+    for (const cluster of paperClusters) {
+      let best = 0;
+      for (const card of cluster.superCards) {
+        for (const entry of card.sourceEntries) {
+          best = Math.max(best, scoreMap.get(entry) ?? 0);
+        }
+      }
+      clusterRanks.push({ cluster, bestScore: best });
+    }
 
     // Sort clusters by best search relevance score, then quality score
-    paperClusters.sort((a, b) => {
-      const aScore = Math.max(...a.superCards.flatMap(sc => sc.sourceEntries.map(e => scoreMap.get(e) ?? 0)));
-      const bScore = Math.max(...b.superCards.flatMap(sc => sc.sourceEntries.map(e => scoreMap.get(e) ?? 0)));
+    clusterRanks.sort((a, b) => {
+      const aScore = a.bestScore;
+      const bScore = b.bestScore;
       if (bScore !== aScore) return bScore - aScore;
-      return (b.superCards[0]?.qualityScore ?? 0) - (a.superCards[0]?.qualityScore ?? 0);
+      return (b.cluster.superCards[0]?.qualityScore ?? 0) - (a.cluster.superCards[0]?.qualityScore ?? 0);
     });
 
     // Flatten clusters into display entries with cluster boundaries
     const displayResults: DisplayEntry[] = [];
     let clusterId = 0;
-    for (const cluster of paperClusters) {
+    for (const { cluster } of clusterRanks) {
       if (displayResults.length >= 50) break;
       let isFirst = true;
       for (const card of cluster.superCards) {
@@ -729,7 +747,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     const edit = new vscode.WorkspaceEdit();
-    const fieldLine = `${indent}${field} = {${value}},`;
+    const fieldLine = `${indent}${field} = ${formatFieldValue(value)},`;
 
     if (existingFieldLine >= 0) {
       const existingFieldEndLine = this.findExistingFieldEndLine(lines, existingFieldLine, entryEnd);
@@ -834,7 +852,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     const edit = new vscode.WorkspaceEdit();
-    const fieldLine = `${indent}${field} = {${value}},`;
+    const fieldLine = `${indent}${field} = ${formatFieldValue(value)},`;
 
     if (existingFieldLine >= 0) {
       const existingFieldEndLine = this.findExistingFieldEndLine(lines, existingFieldLine, entryEnd);
@@ -1215,10 +1233,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       font-family: var(--vscode-editor-font-family);
       font-weight: 500;
       padding-top: 2px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .field-value {
       flex: 1;
+      min-width: 0;
       word-break: break-word;
       padding-right: 6px;
       line-height: 1.4;
@@ -1693,7 +1715,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     let currentEntry = null;
     let isSearching = false;
     let canInsert = false;
-    let debounceTimer;
     let savedSearchQuery = '';
     const MAX_VALUE_LENGTH = 300;
 
@@ -1750,11 +1771,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     });
 
     searchBannerLink.addEventListener('click', () => {
-      searchInput.value = savedSearchQuery;
+      const query = savedSearchQuery;
+      searchInput.value = query;
       updateClearButton();
       isSearching = true;
       hideSearchBanner();
-      vscode.postMessage({ command: 'search', query: savedSearchQuery });
+      vscode.postMessage({ command: 'search', query });
     });
 
     searchBannerDismiss.addEventListener('click', () => {
@@ -1762,15 +1784,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     });
 
     searchInput.addEventListener('input', () => {
-      clearTimeout(debounceTimer);
       updateClearButton();
       hideSearchBanner();
       const query = searchInput.value.trim();
       isSearching = query.length > 0;
 
-      debounceTimer = setTimeout(() => {
+      // Keep 1-character input local so we don't trigger a matches response
+      // (which is used to exit search mode when navigating to an entry).
+      if (query.length === 0 || query.length >= 2) {
         vscode.postMessage({ command: 'search', query });
-      }, 50);
+      }
     });
 
     window.addEventListener('message', (event) => {
@@ -1897,7 +1920,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           }
 
           html += '<div class="field-row">';
-          html += '<span class="field-name">' + escapeHtml(field.name) + '</span>';
+          html += '<span class="field-name" title="' + escapeHtml(field.name) + '">' + escapeHtml(field.name) + '</span>';
 
           if (showFieldComparison) {
             // Edit mode: show comparison styling and insert buttons

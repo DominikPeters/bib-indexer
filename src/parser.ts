@@ -88,10 +88,12 @@ export function parseBibFile(content: string, filePath: string): ParseResult {
 
     // Build a map of entry key to line positions
     const entryPositions = findEntryPositions(content);
+    const rawFieldExpressions = buildRawFieldExpressionMap(content);
     const ignoredPatterns = getIgnoredFieldPatterns();
 
     for (const entry of result.entries) {
       const position = entryPositions.get(entry.key.toLowerCase()) ?? { start: 0, end: 0 };
+      const rawExpressionsForEntry = rawFieldExpressions.get(entry.key.toLowerCase());
 
       // Convert fields from string[] to string
       // Some fields (like author) may be split into arrays by the parser
@@ -101,6 +103,15 @@ export function parseBibFile(content: string, filePath: string): ParseResult {
         if (isFieldIgnored(key, ignoredPatterns)) {
           continue;
         }
+
+        // Preserve original BibTeX expressions for concatenated fields
+        // (e.g., proc # {38th} # neurips) because parser output flattens away '#'
+        const rawExpression = rawExpressionsForEntry?.get(key.toLowerCase());
+        if (rawExpression) {
+          fields[key] = rawExpression;
+          continue;
+        }
+
         if (values.length > 0) {
           // Join multiple values - for author this preserves "A and B and C"
           let value = values.join(' and ');
@@ -305,4 +316,82 @@ export function normalizeAuthorsFromCreators(creators: ParsedName[]): string {
     .map(n => n.toLowerCase())
     .sort()
     .join(' ');
+}
+
+function buildRawFieldExpressionMap(content: string): Map<string, Map<string, string>> {
+  const expressionMap = new Map<string, Map<string, string>>();
+  const lines = content.split('\n');
+  const entryStartRegex = /^\s*@\w+\s*\{\s*([^,\s]+)/i;
+  const fieldStartRegex = /^\s*([A-Za-z][\w:-]*)\s*=\s*(.+),\s*$/;
+
+  let inEntry = false;
+  let entryKey: string | null = null;
+  let braceDepth = 0;
+
+  for (const line of lines) {
+    if (!inEntry) {
+      const match = line.match(entryStartRegex);
+      if (!match) {
+        continue;
+      }
+      inEntry = true;
+      entryKey = match[1].toLowerCase();
+      braceDepth = countBraces(line);
+      if (braceDepth <= 0) {
+        inEntry = false;
+        entryKey = null;
+        braceDepth = 0;
+      }
+      continue;
+    }
+
+    if (entryKey) {
+      const fieldMatch = line.match(fieldStartRegex);
+      if (fieldMatch && hasTopLevelConcatenation(fieldMatch[2])) {
+        const fieldName = fieldMatch[1].toLowerCase();
+        const rawValue = fieldMatch[2].trim();
+        const fields = expressionMap.get(entryKey) ?? new Map<string, string>();
+        fields.set(fieldName, rawValue);
+        expressionMap.set(entryKey, fields);
+      }
+    }
+
+    braceDepth += countBraces(line);
+    if (braceDepth <= 0) {
+      inEntry = false;
+      entryKey = null;
+      braceDepth = 0;
+    }
+  }
+
+  return expressionMap;
+}
+
+function hasTopLevelConcatenation(value: string): boolean {
+  let braceDepth = 0;
+  let inString = false;
+
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (ch === '"' && (i === 0 || value[i - 1] !== '\\')) {
+      inString = !inString;
+      continue;
+    }
+    if (inString) {
+      continue;
+    }
+    if (ch === '{') {
+      braceDepth++;
+      continue;
+    }
+    if (ch === '}' && braceDepth > 0) {
+      braceDepth--;
+      continue;
+    }
+    if (ch === '#' && braceDepth === 0) {
+      return true;
+    }
+  }
+
+  return false;
 }

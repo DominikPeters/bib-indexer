@@ -75,11 +75,28 @@ export function formatBibtex(entry: IndexedEntry): string {
   });
 
   for (const [key, value] of sortedFields) {
-    lines.push(`  ${key} = {${value}},`);
+    lines.push(`  ${key} = ${formatFieldValue(value)},`);
   }
 
   lines.push('}');
   return lines.join('\n');
+}
+
+/**
+ * Format a field value for output.
+ * Most values are wrapped in braces, but BibTeX concatenation expressions
+ * should stay raw (e.g., proc # {39th} # aaai).
+ */
+export function formatFieldValue(value: string): string {
+  if (isConcatenationExpression(value)) {
+    return value;
+  }
+  return `{${value}}`;
+}
+
+function isConcatenationExpression(value: string): boolean {
+  // Conservative detection to avoid false positives like "C# tutorial".
+  return /\s#\s/.test(value);
 }
 
 /**

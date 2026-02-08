@@ -256,6 +256,20 @@ suite('Parser Test Suite', () => {
     // Unknown commands are preserved as-is
     assert.ok(result.entries[0].fields.title.includes('\\mycustomcmd'));
   });
+
+  test('should preserve concatenated field expressions with #', () => {
+    const content = `@inproceedings{KePe23a,
+  author = {Leon Kellerhals and Jannik Peters},
+  booktitle = proc # {38th} # neurips,
+  title = {Proportional Fairness in Clustering: A Social Choice Perspective},
+  note = {Forthcoming.},
+  year = {2024}
+}`;
+    const result = parseBibFile(content, '/test/file.bib');
+
+    assert.strictEqual(result.entries.length, 1);
+    assert.strictEqual(result.entries[0].fields.booktitle, 'proc # {38th} # neurips');
+  });
 });
 
 suite('Round-trip Test Suite', () => {
