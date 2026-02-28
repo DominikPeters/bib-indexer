@@ -870,7 +870,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const lines = content.split('\n');
 
     // Find a safe insertion point
-    const insertLine = findEntryInsertionPoint(lines, this.currentEntry);
+    const insertLine = findEntryInsertionPoint(lines, this.currentEntry, editor.selection.active.line);
 
     const bibtex = formatBibtex(entry);
     const edit = new vscode.WorkspaceEdit();
@@ -992,7 +992,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const content = document.getText();
     const lines = content.split('\n');
 
-    const insertLine = findEntryInsertionPoint(lines, this.currentEntry);
+    const insertLine = findEntryInsertionPoint(lines, this.currentEntry, editor.selection.active.line);
     const bibtex = formatBibtex(synthetic);
     const edit = new vscode.WorkspaceEdit();
 

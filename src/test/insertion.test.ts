@@ -139,6 +139,38 @@ suite('Entry Insertion Test Suite', () => {
 
       assert.strictEqual(result, 3, 'Should insert right after entry, not at very end');
     });
+
+    test('should insert near cursor before next entry when not in an entry', () => {
+      const lines = [
+        '@article{first,',
+        '  title = {First},',
+        '}',
+        '',
+        '% cursor here',
+        '',
+        '@article{second,',
+        '  title = {Second},',
+        '}',
+      ];
+
+      const result = findEntryInsertionPoint(lines, null, 4);
+
+      assert.strictEqual(result, 6, 'Should insert before the second entry');
+    });
+
+    test('should insert after containing entry when cursor is inside entry but currentEntry is missing', () => {
+      const lines = [
+        '@article{first,',
+        '  title = {First},',
+        '  year = {2024}',
+        '}',
+        '',
+      ];
+
+      const result = findEntryInsertionPoint(lines, null, 2);
+
+      assert.strictEqual(result, 4, 'Should insert after the current entry');
+    });
   });
 
   suite('formatBibtex', () => {

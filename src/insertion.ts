@@ -9,50 +9,92 @@ import { IndexedEntry, CANONICAL_FIELD_ORDER } from './types';
  *
  * @param lines - The lines of the current file
  * @param currentEntry - The entry at the cursor position (if any)
+ * @param cursorLine - The active cursor line (0-indexed) as fallback anchor
  * @returns The 0-indexed line number where the entry should be inserted
  */
-export function findEntryInsertionPoint(lines: string[], currentEntry: { endLine?: number } | null): number {
+export function findEntryInsertionPoint(
+  lines: string[],
+  currentEntry: { endLine?: number } | null,
+  cursorLine?: number
+): number {
   // If we have a current entry, insert after it
   if (currentEntry && currentEntry.endLine) {
     return currentEntry.endLine; // endLine is 1-indexed, so this gives us the line after
   }
 
-  // Otherwise, find the last entry in the file and insert after it
-  let lastEntryEnd = -1;
-  let inEntry = false;
-  let braceDepth = 0;
+  if (typeof cursorLine === 'number') {
+    const clampedCursorLine = Math.max(0, Math.min(cursorLine, Math.max(0, lines.length - 1)));
+    const entryRanges = findEntryRanges(lines);
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-
-    // Check for entry start
-    if (!inEntry && /^\s*@\w+\s*\{/i.test(line)) {
-      inEntry = true;
-      braceDepth = 0;
+    const containingEntry = entryRanges.find(
+      (entry) => clampedCursorLine >= entry.start && clampedCursorLine <= entry.end
+    );
+    if (containingEntry) {
+      return containingEntry.end + 1;
     }
 
-    if (inEntry) {
-      // Count braces
-      for (const char of line) {
-        if (char === '{') braceDepth++;
-        if (char === '}') braceDepth--;
-      }
-
-      // Entry ends when braces are balanced
-      if (braceDepth <= 0) {
-        lastEntryEnd = i + 1; // Line after the closing brace
-        inEntry = false;
-      }
+    const nextEntry = entryRanges.find((entry) => entry.start > clampedCursorLine);
+    if (nextEntry) {
+      return nextEntry.start;
     }
+
+    const previousEntry = [...entryRanges].reverse().find((entry) => entry.end < clampedCursorLine);
+    if (previousEntry) {
+      return previousEntry.end + 1;
+    }
+
+    return Math.max(0, Math.min(clampedCursorLine, lines.length));
   }
 
+  // Otherwise, find the last entry in the file and insert after it
+  const entryRanges = findEntryRanges(lines);
+  const lastEntry = entryRanges[entryRanges.length - 1];
+
   // If we found entries, insert after the last one
-  if (lastEntryEnd >= 0) {
-    return lastEntryEnd;
+  if (lastEntry) {
+    return lastEntry.end + 1;
   }
 
   // Otherwise, insert at end of file
   return lines.length;
+}
+
+function findEntryRanges(lines: string[]): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  let inEntry = false;
+  let braceDepth = 0;
+  let currentStart = -1;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (!inEntry && /^\s*@\w+\s*\{/i.test(line)) {
+      inEntry = true;
+      braceDepth = 0;
+      currentStart = i;
+    }
+
+    if (!inEntry) {
+      continue;
+    }
+
+    for (const char of line) {
+      if (char === '{') {
+        braceDepth++;
+      }
+      if (char === '}') {
+        braceDepth--;
+      }
+    }
+
+    if (braceDepth <= 0) {
+      ranges.push({ start: currentStart, end: i });
+      inEntry = false;
+      currentStart = -1;
+    }
+  }
+
+  return ranges;
 }
 
 /**
