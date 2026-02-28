@@ -1,5 +1,5 @@
 /**
- * Too Many Bibs - VS Code Extension Entry Point
+ * Bib Indexer - VS Code Extension Entry Point
  */
 
 import * as vscode from 'vscode';
@@ -13,10 +13,10 @@ let sidebarProvider: SidebarProvider;
 
 export async function activate(context: vscode.ExtensionContext) {
   // Create output channel for logging
-  outputChannel = vscode.window.createOutputChannel('Too Many Bibs');
+  outputChannel = vscode.window.createOutputChannel('Bib Indexer');
   context.subscriptions.push(outputChannel);
 
-  outputChannel.appendLine('Too Many Bibs extension activating...');
+  outputChannel.appendLine('Bib Indexer extension activating...');
 
   // Initialize the index manager
   indexManager = new BibIndexManager(context, outputChannel);
@@ -35,12 +35,12 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Register webview provider
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider('tooManyBibs.main', sidebarProvider)
+    vscode.window.registerWebviewViewProvider('bibIndexer.main', sidebarProvider)
   );
 
   // Register commands
   context.subscriptions.push(
-    vscode.commands.registerCommand('tooManyBibs.addFolder', async () => {
+    vscode.commands.registerCommand('bibIndexer.addFolder', async () => {
       const uri = await vscode.window.showOpenDialog({
         canSelectFiles: false,
         canSelectFolders: true,
@@ -56,7 +56,7 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('tooManyBibs.removeFolder', async () => {
+    vscode.commands.registerCommand('bibIndexer.removeFolder', async () => {
       const folders = indexManager.getFolders();
       if (folders.length === 0) {
         vscode.window.showInformationMessage('No folders are currently indexed.');
@@ -75,11 +75,11 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('tooManyBibs.reindex', async () => {
+    vscode.commands.registerCommand('bibIndexer.reindex', async () => {
       await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: 'Too Many Bibs: Reindexing all files...',
+          title: 'Bib Indexer: Reindexing all files...',
           cancellable: false,
         },
         async () => {
@@ -89,7 +89,7 @@ export async function activate(context: vscode.ExtensionContext) {
           sidebarProvider.refresh();
         }
       );
-      vscode.window.showInformationMessage('Too Many Bibs: Reindex complete!');
+      vscode.window.showInformationMessage('Bib Indexer: Reindex complete!');
     })
   );
 
@@ -137,9 +137,9 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  outputChannel.appendLine('Too Many Bibs extension activated!');
+  outputChannel.appendLine('Bib Indexer extension activated!');
 }
 
 export function deactivate() {
-  outputChannel?.appendLine('Too Many Bibs extension deactivated.');
+  outputChannel?.appendLine('Bib Indexer extension deactivated.');
 }

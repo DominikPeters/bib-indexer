@@ -84,7 +84,7 @@ export class BibIndexManager {
     }
 
     // Load folders from settings (but preserve any from old index if settings is empty)
-    const config = vscode.workspace.getConfiguration('tooManyBibs');
+    const config = vscode.workspace.getConfiguration('bibIndexer');
     const foldersFromSettings = config.get<string[]>('indexedFolders') ?? [];
     if (foldersFromSettings.length > 0) {
       this.index.folders = foldersFromSettings;
@@ -280,7 +280,7 @@ export class BibIndexManager {
    * Update settings with current folder list
    */
   private async updateSettings(): Promise<void> {
-    const config = vscode.workspace.getConfiguration('tooManyBibs');
+    const config = vscode.workspace.getConfiguration('bibIndexer');
     await config.update('indexedFolders', this.index.folders, vscode.ConfigurationTarget.Global);
   }
 
@@ -644,6 +644,6 @@ export class BibIndexManager {
    * Log a message to the output channel
    */
   private log(message: string): void {
-    this.outputChannel.appendLine(`[TooManyBibs] ${message}`);
+    this.outputChannel.appendLine(`[BibIndexer] ${message}`);
   }
 }

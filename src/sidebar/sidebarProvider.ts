@@ -87,7 +87,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             break;
 
           case 'addFolder':
-            await vscode.commands.executeCommand('tooManyBibs.addFolder');
+            await vscode.commands.executeCommand('bibIndexer.addFolder');
             break;
 
           case 'addFile':
@@ -106,7 +106,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             break;
 
           case 'reindex':
-            await vscode.commands.executeCommand('tooManyBibs.reindex');
+            await vscode.commands.executeCommand('bibIndexer.reindex');
             break;
 
           case 'removeFile':
@@ -140,7 +140,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
       } catch (error) {
         const messageText = error instanceof Error ? error.message : String(error);
-        vscode.window.showErrorMessage(`Too Many Bibs: ${messageText}`);
+        vscode.window.showErrorMessage(`Bib Indexer: ${messageText}`);
       }
     });
   }
@@ -336,7 +336,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const config = vscode.workspace.getConfiguration('tooManyBibs');
+    const config = vscode.workspace.getConfiguration('bibIndexer');
     const threshold = config.get<number>('similarityThreshold') ?? 0.85;
     const searchIndex = this.indexManager.getSearchIndex();
 
@@ -456,7 +456,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     // Cluster by paper identity, then build super cards within each cluster
-    const config = vscode.workspace.getConfiguration('tooManyBibs');
+    const config = vscode.workspace.getConfiguration('bibIndexer');
     const threshold = config.get<number>('similarityThreshold') ?? 0.85;
     const paperClusters = buildPaperClusters(clusteringResults.map(r => r.entry), threshold);
 

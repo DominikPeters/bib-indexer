@@ -10,7 +10,7 @@ import { IndexedEntry, ParsedName } from './types';
  * Get the list of ignored field patterns from settings
  */
 function getIgnoredFieldPatterns(): string[] {
-  const config = vscode.workspace.getConfiguration('tooManyBibs');
+  const config = vscode.workspace.getConfiguration('bibIndexer');
   return config.get<string[]>('ignoredFields', [
     'keywords', 'abstract', 'month', 'date-added', 'date-modified', 'bdsk-file-*'
   ]);

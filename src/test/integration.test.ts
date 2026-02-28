@@ -30,13 +30,13 @@ async function waitForCondition(
 }
 
 function createTempDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'tmb-test-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'bib-indexer-test-'));
 }
 
 function createWorkspaceTempDir(): string {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   const baseDir = workspaceRoot ?? fixturesDir;
-  return fs.mkdtempSync(path.join(baseDir, 'tmb-watch-'));
+  return fs.mkdtempSync(path.join(baseDir, 'bib-indexer-watch-'));
 }
 
 function cleanupFixtureTmpDirs(): void {
@@ -62,7 +62,7 @@ function createMockContext(storageDir: string): vscode.ExtensionContext {
 }
 
 function createOutputChannel(): vscode.OutputChannel {
-  return vscode.window.createOutputChannel('TooManyBibs Test');
+  return vscode.window.createOutputChannel('BibIndexer Test');
 }
 
 function createTestIndexManager(storageDir: string): BibIndexManager {
@@ -83,8 +83,8 @@ function setCursor(editor: vscode.TextEditor, line: number, character = 0): void
 }
 
 async function activateExtensionForEditorFeatures(): Promise<void> {
-  const extension = vscode.extensions.all.find(ext => ext.packageJSON?.name === 'too-many-bibs');
-  assert.ok(extension, 'Too Many Bibs extension should be available in integration tests');
+  const extension = vscode.extensions.all.find(ext => ext.packageJSON?.name === 'bib-indexer');
+  assert.ok(extension, 'Bib Indexer extension should be available in integration tests');
   if (!extension!.isActive) {
     await extension!.activate();
   }

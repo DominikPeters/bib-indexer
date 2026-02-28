@@ -1,6 +1,6 @@
 {
-  "name": "too-many-bibs",
-  "displayName": "Too Many Bibs",
+  "name": "bib-indexer",
+  "displayName": "Bib Indexer",
   "description": "Bibliography manager for researchers with separate bib files per paper",
   "version": "0.0.1",
   "engines": {
@@ -17,40 +17,40 @@
   "contributes": {
     "commands": [
       {
-        "command": "tooManyBibs.addFolder",
-        "title": "Too Many Bibs: Add Folder to Index"
+        "command": "bibIndexer.addFolder",
+        "title": "Bib Indexer: Add Folder to Index"
       },
       {
-        "command": "tooManyBibs.removeFolder",
-        "title": "Too Many Bibs: Remove Folder from Index"
+        "command": "bibIndexer.removeFolder",
+        "title": "Bib Indexer: Remove Folder from Index"
       },
       {
-        "command": "tooManyBibs.reindex",
-        "title": "Too Many Bibs: Reindex All Files"
+        "command": "bibIndexer.reindex",
+        "title": "Bib Indexer: Reindex All Files"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "tooManyBibs",
-          "title": "Too Many Bibs",
+          "id": "bibIndexer",
+          "title": "Bib Indexer",
           "icon": "$(references)"
         }
       ]
     },
     "views": {
-      "tooManyBibs": [
+      "bibIndexer": [
         {
-          "id": "tooManyBibs.main",
+          "id": "bibIndexer.main",
           "type": "webview",
           "name": "Bibliography"
         }
       ]
     },
     "configuration": {
-      "title": "Too Many Bibs",
+      "title": "Bib Indexer",
       "properties": {
-        "tooManyBibs.indexedFolders": {
+        "bibIndexer.indexedFolders": {
           "type": "array",
           "items": {
             "type": "string"
@@ -58,14 +58,14 @@
           "default": [],
           "description": "Folders to scan recursively for .bib files"
         },
-        "tooManyBibs.similarityThreshold": {
+        "bibIndexer.similarityThreshold": {
           "type": "number",
           "default": 0.85,
           "minimum": 0,
           "maximum": 1,
           "description": "Minimum similarity score (0-1) for matching entries"
         },
-        "tooManyBibs.ignoredFields": {
+        "bibIndexer.ignoredFields": {
           "type": "array",
           "items": {
             "type": "string"

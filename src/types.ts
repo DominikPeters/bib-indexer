@@ -1,5 +1,5 @@
 /**
- * Core type definitions for Too Many Bibs
+ * Core type definitions for Bib Indexer
  */
 
 /**
