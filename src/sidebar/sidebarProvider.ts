@@ -344,12 +344,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const files = this.indexManager.getFiles();
     const folders = this.indexManager.getFolders();
     const entryCount = this.indexManager.getEntries().length;
+    const fileCount = Object.keys(files).length;
 
     this._view.webview.postMessage({
       command: 'status',
       folders: folders.length,
-      files: Object.keys(files).length,
+      files: fileCount,
       entries: entryCount,
+      isEmpty: fileCount === 0,
     });
   }
 
@@ -1952,6 +1954,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const pendingFileRemovals = new Set();
     let lastManageFolders = null;
     let lastManageFilesByFolder = null;
+    let indexIsEmpty = true;
 
     vscode.postMessage({ command: 'ready' });
 
@@ -2036,6 +2039,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
       switch (message.command) {
         case 'status':
+          indexIsEmpty = message.isEmpty;
           statusText.textContent = message.entries + ' entries in ' +
             message.files + ' files (' + message.folders + ' folders)';
           break;
@@ -2175,7 +2179,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     function renderMatches(currentEntry, matches) {
       if (!currentEntry) {
-        content.innerHTML = '<div class="placeholder">Place cursor in a bib entry to see matches from other files</div>';
+        if (indexIsEmpty) {
+          content.innerHTML = '<div class="placeholder">No files indexed yet.<br><br><a href="#" id="emptyStateManageLink">Add folders</a> to get started.</div>';
+          document.getElementById('emptyStateManageLink')?.addEventListener('click', (e) => {
+            e.preventDefault();
+            mainView.classList.add('hidden');
+            manageView.classList.add('active');
+            vscode.postMessage({ command: 'showManageFiles' });
+          });
+        } else {
+          content.innerHTML = '<div class="placeholder">Place cursor in a bib entry to see matches from other files</div>';
+        }
         return;
       }
 

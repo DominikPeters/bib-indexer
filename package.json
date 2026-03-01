@@ -49,7 +49,8 @@
         {
           "id": "bibIndexer",
           "title": "Bib Indexer",
-          "icon": "$(references)"
+          "icon": "$(references)",
+          "tooltip": "Bib Indexer"
         }
       ]
     },
