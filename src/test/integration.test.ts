@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { BibIndexManager } from '../index';
+import { BibIndexManager, type FolderAddProgressEvent } from '../index';
 import { SidebarProvider } from '../sidebar/sidebarProvider';
 
 const fixturesDir = path.join(__dirname, '..', '..', 'src', 'test', 'fixtures');
@@ -119,6 +119,45 @@ suite('Integration: BibIndexManager with real files', () => {
     const filePaths = Object.keys(files);
     assert.ok(filePaths.some(f => f.endsWith('sample.bib')), 'Should include sample.bib');
     assert.ok(filePaths.some(f => f.endsWith('sample2.bib')), 'Should include sample2.bib');
+  });
+
+  test('should report addFolder progress with totals filtered by excluded files', async () => {
+    const folder = createTempDir();
+    const includedFile = writeBibFile(folder, 'included.bib', `@article{included,
+  title = {Included},
+  author = {One, Author},
+  year = {2020}
+}`);
+    const excludedFile = writeBibFile(folder, 'excluded.bib', `@article{excluded,
+  title = {Excluded},
+  author = {Two, Author},
+  year = {2021}
+}`);
+
+    try {
+      const progressEvents: FolderAddProgressEvent[] = [];
+      const rawIndex = indexManager as unknown as { index: { excludedFiles: string[] } };
+      rawIndex.index.excludedFiles.push(excludedFile);
+
+      await indexManager.addFolder(folder, (event) => {
+        progressEvents.push(event);
+      });
+
+      assert.ok(progressEvents.length >= 2, 'Expected discovering and indexing progress events');
+      assert.strictEqual(progressEvents[0].phase, 'discovering', 'First event should be discovering');
+
+      const indexingEvents = progressEvents.filter(
+        (event): event is Extract<FolderAddProgressEvent, { phase: 'indexing' }> => event.phase === 'indexing'
+      );
+      assert.strictEqual(indexingEvents.length, 1, 'Only non-excluded files should be indexed');
+      assert.strictEqual(indexingEvents[0].current, 1, 'Final indexed count should be 1');
+      assert.strictEqual(indexingEvents[0].total, 1, 'Total should exclude files in excludedFiles');
+
+      assert.strictEqual(indexManager.getEntriesForFile(includedFile).length, 1, 'Included file should be indexed');
+      assert.strictEqual(indexManager.getEntriesForFile(excludedFile).length, 0, 'Excluded file should not be indexed');
+    } finally {
+      fs.rmSync(folder, { recursive: true, force: true });
+    }
   });
 
   test('should find entries for a specific file', async () => {

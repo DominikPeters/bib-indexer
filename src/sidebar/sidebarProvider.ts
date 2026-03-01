@@ -4,7 +4,7 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { BibIndexManager } from '../index';
+import { BibIndexManager, type FolderAddProgressEvent } from '../index';
 import { IndexedEntry, SuperCard } from '../types';
 import { findMatches, buildSuperCards, buildPaperClusters, computeQualityScore } from '../matching';
 import { normalizeForFilter, parseBibFile } from '../parser';
@@ -12,6 +12,22 @@ import { CANONICAL_FIELD_ORDER } from '../types';
 import { findEntryInsertionPoint, formatBibtex, determineBlankLines, formatFieldValue } from '../insertion';
 import { computeDiff } from '../diff';
 import { normalizeArxivValue, normalizeDoiValue, normalizeUrlValue } from '../editorLinks';
+
+type FolderAddProgressMessage =
+  | { command: 'folderAddProgress'; active: false }
+  | { command: 'folderAddProgress'; active: true; phase: 'discovering' }
+  | { command: 'folderAddProgress'; active: true; phase: 'indexing'; current: number; total: number };
+
+type FileAddProgressMessage =
+  | { command: 'fileAddProgress'; active: false }
+  | { command: 'fileAddProgress'; active: true };
+
+type RemoveProgressMessage = {
+  command: 'removeProgress';
+  kind: 'folder' | 'file';
+  target: string;
+  active: boolean;
+};
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
@@ -87,7 +103,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             break;
 
           case 'addFolder':
-            await vscode.commands.executeCommand('bibIndexer.addFolder');
+            const folderUri = await vscode.window.showOpenDialog({
+              canSelectFiles: false,
+              canSelectFolders: true,
+              canSelectMany: false,
+              openLabel: 'Add Folder to Index',
+            });
+            if (folderUri && folderUri.length > 0) {
+              try {
+                // Show loading immediately after folder selection, before settings/fs work.
+                this.sendFolderAddProgress({ phase: 'discovering' });
+                await this.indexManager.addFolder(folderUri[0].fsPath, (event) => {
+                  this.sendFolderAddProgress(event);
+                });
+                this.sendFileManagementData();
+                this.refresh();
+              } finally {
+                this.sendFolderAddProgress({ command: 'folderAddProgress', active: false });
+              }
+            }
             break;
 
           case 'addFile':
@@ -99,9 +133,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
               openLabel: 'Add File to Index',
             });
             if (fileUri && fileUri.length > 0) {
-              await this.indexManager.addFile(fileUri[0].fsPath);
-              this.sendFileManagementData();
-              this.refresh();
+              // Show loading immediately after file selection, before indexing work starts.
+              this.sendFileAddProgress(true);
+              try {
+                await this.indexManager.addFile(fileUri[0].fsPath);
+                this.sendFileManagementData();
+                this.refresh();
+              } finally {
+                this.sendFileAddProgress(false);
+              }
             }
             break;
 
@@ -110,15 +150,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             break;
 
           case 'removeFile':
-            this.indexManager.removeFile(message.file);
-            this.sendFileManagementData();
-            this.refresh();
+            this.sendRemoveProgress('file', message.file, true);
+            try {
+              this.indexManager.removeFile(message.file);
+              this.sendFileManagementData();
+              this.refresh();
+            } finally {
+              this.sendRemoveProgress('file', message.file, false);
+            }
             break;
 
           case 'removeFolder':
-            await this.indexManager.removeFolder(message.folder);
-            this.sendFileManagementData();
-            this.refresh();
+            this.sendRemoveProgress('folder', message.folder, true);
+            try {
+              await this.indexManager.removeFolder(message.folder);
+              this.sendFileManagementData();
+              this.refresh();
+            } finally {
+              this.sendRemoveProgress('folder', message.folder, false);
+            }
             break;
 
           case 'showFilesModal':
@@ -186,6 +236,54 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       current,
       total,
     });
+  }
+
+  private sendFolderAddProgress(event: FolderAddProgressEvent): void;
+  private sendFolderAddProgress(message: { command: 'folderAddProgress'; active: false }): void;
+  private sendFolderAddProgress(
+    input: FolderAddProgressEvent | { command: 'folderAddProgress'; active: false }
+  ): void {
+    if (!this._view) return;
+
+    let message: FolderAddProgressMessage;
+    if ('command' in input) {
+      message = input;
+    } else if (input.phase === 'discovering') {
+      message = { command: 'folderAddProgress', active: true, phase: 'discovering' };
+    } else {
+      message = {
+        command: 'folderAddProgress',
+        active: true,
+        phase: 'indexing',
+        current: input.current,
+        total: input.total,
+      };
+    }
+
+    this._view.webview.postMessage(message);
+  }
+
+  private sendFileAddProgress(active: boolean): void {
+    if (!this._view) return;
+    const message: FileAddProgressMessage = active
+      ? { command: 'fileAddProgress', active: true }
+      : { command: 'fileAddProgress', active: false };
+    this._view.webview.postMessage(message);
+  }
+
+  private sendRemoveProgress(
+    kind: 'folder' | 'file',
+    target: string,
+    active: boolean
+  ): void {
+    if (!this._view) return;
+    const message: RemoveProgressMessage = {
+      command: 'removeProgress',
+      kind,
+      target,
+      active,
+    };
+    this._view.webview.postMessage(message);
   }
 
   getCurrentEntry(): IndexedEntry | null {
@@ -1476,6 +1574,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       background: var(--vscode-button-secondaryHoverBackground);
     }
 
+    .manage-actions button:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+
+    .manage-actions button:disabled:hover {
+      background: var(--vscode-button-secondaryBackground);
+    }
+
+    .manage-progress {
+      display: none;
+      align-items: center;
+      margin: -4px 0 10px;
+      font-size: 1em;
+      color: var(--vscode-foreground);
+      font-weight: 500;
+    }
+
+    .manage-progress .spinner {
+      border-color: var(--vscode-foreground);
+      border-top-color: transparent;
+    }
+
+    .manage-progress.active {
+      display: inline-flex;
+    }
+
     .manage-section { margin-bottom: 8px; }
 
     .manage-section h4 {
@@ -1519,14 +1644,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     .manage-item button {
       background: transparent;
-      color: var(--vscode-errorForeground);
+      color: var(--vscode-descriptionForeground);
       border: none;
       cursor: pointer;
-      padding: 1px 4px;
-      font-size: 0.8em;
+      padding: 2px 7px;
+      font-size: 1.25em;
+      line-height: 1;
     }
 
-    .manage-item button:hover { text-decoration: underline; }
+    .manage-item button:hover {
+      color: var(--vscode-foreground);
+      text-decoration: none;
+    }
+
+    .manage-remove-spinner {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      color: var(--vscode-descriptionForeground);
+    }
+
+    .manage-remove-spinner .spinner {
+      width: 11px;
+      height: 11px;
+      margin-right: 0;
+    }
 
     .manage-item.nested { margin-left: 20px; }
 
@@ -1799,6 +1943,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     let canInsert = false;
     let savedSearchQuery = '';
     const MAX_VALUE_LENGTH = 300;
+    let folderAddInProgress = false;
+    let folderAddPhase = '';
+    let folderAddCurrent = 0;
+    let folderAddTotal = 0;
+    let fileAddInProgress = false;
+    const pendingFolderRemovals = new Set();
+    const pendingFileRemovals = new Set();
+    let lastManageFolders = null;
+    let lastManageFilesByFolder = null;
 
     vscode.postMessage({ command: 'ready' });
 
@@ -1905,11 +2058,55 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'fileManagementData':
+          lastManageFolders = message.folders;
+          lastManageFilesByFolder = message.filesByFolder;
           renderFileManagement(message.folders, message.filesByFolder);
           break;
 
         case 'filesModalData':
           renderFilesModal(message.entries);
+          break;
+
+        case 'folderAddProgress':
+          if (message.active) {
+            folderAddInProgress = true;
+            folderAddPhase = message.phase;
+            if (message.phase === 'indexing') {
+              folderAddCurrent = message.current;
+              folderAddTotal = message.total;
+            } else {
+              folderAddCurrent = 0;
+              folderAddTotal = 0;
+            }
+          } else {
+            folderAddInProgress = false;
+            folderAddPhase = '';
+            folderAddCurrent = 0;
+            folderAddTotal = 0;
+          }
+          applyManageProgressState();
+          break;
+
+        case 'fileAddProgress':
+          fileAddInProgress = !!message.active;
+          applyManageProgressState();
+          break;
+
+        case 'removeProgress':
+          if (message.kind === 'folder') {
+            if (message.active) {
+              pendingFolderRemovals.add(message.target);
+            } else {
+              pendingFolderRemovals.delete(message.target);
+            }
+          } else if (message.kind === 'file') {
+            if (message.active) {
+              pendingFileRemovals.add(message.target);
+            } else {
+              pendingFileRemovals.delete(message.target);
+            }
+          }
+          rerenderFileManagementIfReady();
           break;
 
         case 'indexProgress':
@@ -1922,6 +2119,59 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           break;
       }
     });
+
+    function manageProgressLabel() {
+      if (folderAddInProgress) {
+        if (folderAddPhase === 'indexing') {
+          return 'Indexing ' + folderAddCurrent + '/' + folderAddTotal + ' .bib files...';
+        }
+        return 'Scanning folder for .bib files...';
+      }
+      if (fileAddInProgress) {
+        return 'Indexing selected .bib file...';
+      }
+      return '';
+    }
+
+    function applyManageProgressState() {
+      const addBusy = folderAddInProgress || fileAddInProgress;
+      const addFolderBtn = document.getElementById('addFolderBtn');
+      const addFileBtn = document.getElementById('addFileBtn');
+      const progressRow = document.getElementById('folderAddProgressRow');
+      const progressLabelEl = document.getElementById('folderAddProgressLabel');
+
+      if (addFolderBtn) {
+        addFolderBtn.disabled = addBusy;
+      }
+      if (addFileBtn) {
+        addFileBtn.disabled = addBusy;
+      }
+      if (progressRow && progressLabelEl) {
+        if (addBusy) {
+          progressRow.classList.add('active');
+          progressLabelEl.textContent = manageProgressLabel();
+        } else {
+          progressRow.classList.remove('active');
+          progressLabelEl.textContent = '';
+        }
+      }
+    }
+
+    function rerenderFileManagementIfReady() {
+      if (Array.isArray(lastManageFolders) && lastManageFilesByFolder) {
+        renderFileManagement(lastManageFolders, lastManageFilesByFolder);
+      }
+    }
+
+    function renderRemoveControl(action, target, isPending) {
+      if (isPending) {
+        return '<span class="manage-remove-spinner" title="Working"><span class="spinner"></span></span>';
+      }
+      if (action === 'removeFolder') {
+        return '<button data-action="removeFolder" data-folder="' + escapeHtml(target) + '">×</button>';
+      }
+      return '<button data-action="removeFile" data-file="' + escapeHtml(target) + '">×</button>';
+    }
 
     function renderMatches(currentEntry, matches) {
       if (!currentEntry) {
@@ -2091,11 +2341,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     function renderFileManagement(folders, filesByFolder) {
       let html = '';
+      const addBusy = folderAddInProgress || fileAddInProgress;
 
       html += '<div class="manage-actions">';
-      html += '<button id="addFolderBtn">+ Folder</button>';
-      html += '<button id="addFileBtn">+ File</button>';
+      html += '<button id="addFolderBtn"' + (addBusy ? ' disabled' : '') + '>+ Folder</button>';
+      html += '<button id="addFileBtn"' + (addBusy ? ' disabled' : '') + '>+ File</button>';
       html += '<button id="refreshIndexBtn">Refresh Index</button>';
+      html += '</div>';
+      html += '<div class="manage-progress' + (addBusy ? ' active' : '') + '" id="folderAddProgressRow">';
+      html += '<span class="spinner"></span><span id="folderAddProgressLabel">' + escapeHtml(manageProgressLabel()) + '</span>';
       html += '</div>';
 
       if (folders.length > 0) {
@@ -2111,7 +2365,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           html += '<span class="folder-toggle" id="toggle-' + folderId + '">▼</span>';
           html += '📁 ' + escapeHtml(folder.split('/').pop()) + '</span>';
           html += '<span class="manage-item-count">' + fileLabel + '</span>';
-          html += '<button data-action="removeFolder" data-folder="' + escapeHtml(folder) + '">×</button>';
+          html += renderRemoveControl('removeFolder', folder, pendingFolderRemovals.has(folder));
           html += '</div>';
 
           html += '<div class="folder-files" id="files-' + folderId + '">';
@@ -2124,7 +2378,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
               html += '<span class="error-indicator" data-errors="' + errorData + '" data-file="' + escapeHtml(file.name) + '" title="' + file.parseErrors.length + ' parsing error(s)">⚠</span>';
             }
             html += '<span class="manage-item-count">' + file.entryCount + '</span>';
-            html += '<button data-action="removeFile" data-file="' + escapeHtml(file.path) + '">×</button>';
+            html += renderRemoveControl('removeFile', file.path, pendingFileRemovals.has(file.path));
             html += '</div>';
           });
           html += '</div>';
@@ -2145,7 +2399,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             html += '<span class="error-indicator" data-errors="' + errorData + '" data-file="' + escapeHtml(file.name) + '" title="' + file.parseErrors.length + ' parsing error(s)">⚠</span>';
           }
           html += '<span class="manage-item-count">' + file.entryCount + '</span>';
-          html += '<button data-action="removeFile" data-file="' + escapeHtml(file.path) + '">×</button>';
+          html += renderRemoveControl('removeFile', file.path, pendingFileRemovals.has(file.path));
           html += '</div>';
         });
         html += '</div>';
@@ -2156,12 +2410,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       }
 
       manageContent.innerHTML = html;
+      applyManageProgressState();
 
       document.getElementById('addFolderBtn')?.addEventListener('click', () => {
+        if (folderAddInProgress || fileAddInProgress) {
+          return;
+        }
         vscode.postMessage({ command: 'addFolder' });
       });
 
       document.getElementById('addFileBtn')?.addEventListener('click', () => {
+        if (folderAddInProgress || fileAddInProgress) {
+          return;
+        }
         vscode.postMessage({ command: 'addFile' });
       });
 
@@ -2173,7 +2434,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       manageContent.querySelectorAll('.manage-item.folder').forEach(item => {
         item.addEventListener('click', (e) => {
           // Don't toggle if clicking the remove button
-          if (e.target.tagName === 'BUTTON') return;
+          if (e.target && e.target.closest && e.target.closest('button[data-action], .manage-remove-spinner')) return;
 
           const folderId = item.dataset.folderId;
           const toggle = document.getElementById('toggle-' + folderId);
@@ -2189,12 +2450,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       manageContent.querySelectorAll('button[data-action="removeFolder"]').forEach(btn => {
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
+          if (!btn.dataset.folder) return;
+          pendingFolderRemovals.add(btn.dataset.folder);
+          rerenderFileManagementIfReady();
           vscode.postMessage({ command: 'removeFolder', folder: btn.dataset.folder });
         });
       });
 
       manageContent.querySelectorAll('button[data-action="removeFile"]').forEach(btn => {
         btn.addEventListener('click', () => {
+          if (!btn.dataset.file) return;
+          pendingFileRemovals.add(btn.dataset.file);
+          rerenderFileManagementIfReady();
           vscode.postMessage({ command: 'removeFile', file: btn.dataset.file });
         });
       });

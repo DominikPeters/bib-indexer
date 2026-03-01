@@ -16,6 +16,10 @@ import { SearchIndexManager } from './search';
 const INDEX_VERSION = 6;
 const INDEX_FILENAME = 'bib-index.json';
 
+export type FolderAddProgressEvent =
+  | { phase: 'discovering' }
+  | { phase: 'indexing'; current: number; total: number };
+
 /**
  * Manages the global bibliography index
  */
@@ -143,7 +147,10 @@ export class BibIndexManager {
   /**
    * Add a folder to the index
    */
-  async addFolder(folderPath: string): Promise<void> {
+  async addFolder(
+    folderPath: string,
+    onProgress?: (event: FolderAddProgressEvent) => void
+  ): Promise<void> {
     const resolvedPath = path.resolve(folderPath);
 
     try {
@@ -162,7 +169,8 @@ export class BibIndexManager {
     await this.updateSettings();
 
     // Scan the new folder
-    await this.scanFolder(resolvedPath);
+    onProgress?.({ phase: 'discovering' });
+    await this.scanFolder(resolvedPath, false, onProgress);
     this.saveIndex();
 
     vscode.window.showInformationMessage(`Added folder to index: ${resolvedPath}`);
@@ -439,7 +447,11 @@ export class BibIndexManager {
   /**
    * Scan a folder recursively for .bib files
    */
-  private async scanFolder(folderPath: string, skipExisting = false): Promise<number> {
+  private async scanFolder(
+    folderPath: string,
+    skipExisting = false,
+    onProgress?: (event: FolderAddProgressEvent) => void
+  ): Promise<number> {
     try {
       await fsPromises.access(folderPath);
     } catch {
@@ -448,17 +460,22 @@ export class BibIndexManager {
 
     const bibFiles = await this.findBibFiles(folderPath);
     this.log(`Found ${bibFiles.length} .bib files in ${folderPath}`);
-    let indexedCount = 0;
-
-    for (const filePath of bibFiles) {
+    const filesToIndex = bibFiles.filter(filePath => {
       if (this.index.excludedFiles.includes(filePath)) {
-        continue;
+        return false;
       }
       if (skipExisting && this.index.files[filePath]) {
-        continue;
+        return false;
       }
+      return true;
+    });
+    const total = filesToIndex.length;
+    let indexedCount = 0;
+
+    for (const filePath of filesToIndex) {
       await this.indexFile(filePath);
       indexedCount++;
+      onProgress?.({ phase: 'indexing', current: indexedCount, total });
     }
     return indexedCount;
   }
