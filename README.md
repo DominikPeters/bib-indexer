@@ -1,6 +1,8 @@
 # Bib Indexer
 
-A VS Code sidebar extension for researchers who maintain separate `.bib` files across multiple projects. Bib Indexer scans all bibliography files on your hard drive and keeps all entries in a database. While editing a bib file, it shows you related existing entries and allows you to quickly merge field data between versions. It also allows searching through all existing entries and adding search results to the current bib file with one click.
+A VS Code sidebar extension for researchers who maintain separate `.bib` bibtex files across multiple projects. Bib Indexer scans all bibliography files on your hard drive and keeps all entries in a database. While editing a bib file, it shows you related existing entries and allows you to quickly merge field data between versions. It also allows searching through all existing entries and adding search results to the current bib file with one click.
+
+Example: You are editing a bibtex entry for a paper, but it is missing page numbers. Some other bib file on your hard drive has a more complete entry for the same paper. Bib Indexer detects this and shows you the more complete entry in the sidebar. You can then click a button to copy the missing page numbers into your current entry.
 
 ![Bib Indexer sidebar overview](images/overview.png)
 
