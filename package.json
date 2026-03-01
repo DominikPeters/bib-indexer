@@ -2,12 +2,27 @@
   "name": "bib-indexer",
   "displayName": "Bib Indexer",
   "description": "Bibliography manager for researchers with separate bib files per paper",
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "publisher": "DominikPeters",
+  "license": "MIT",
+  "homepage": "https://github.com/DominikPeters/bib-indexer",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DominikPeters/bib-indexer.git"
+  },
   "engines": {
     "vscode": "^1.108.0"
   },
   "categories": [
     "Other"
+  ],
+  "keywords": [
+    "bibtex",
+    "bibliography",
+    "latex",
+    "research",
+    "citation",
+    "references"
   ],
   "activationEvents": [
     "onLanguage:bibtex",
