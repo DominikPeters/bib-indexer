@@ -9,7 +9,7 @@ import { IndexedEntry, SuperCard } from '../types';
 import { findMatches, buildSuperCards, buildPaperClusters, computeQualityScore } from '../matching';
 import { normalizeForFilter, parseBibFile } from '../parser';
 import { CANONICAL_FIELD_ORDER } from '../types';
-import { findEntryInsertionPoint, formatBibtex, determineBlankLines, formatFieldValue } from '../insertion';
+import { findEntryInsertionPoint, formatBibtex, determineBlankLines, formatFieldValue, detectFileUsesAlignment } from '../insertion';
 import { computeDiff } from '../diff';
 import { normalizeArxivValue, normalizeDoiValue, normalizeUrlValue } from '../editorLinks';
 
@@ -906,6 +906,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     // Detect indentation from existing fields
     const indent = this.detectFieldIndentation(lines, entryStart, entryEnd);
+    const eqCol = this.detectEqualsAlignment(lines, entryStart, entryEnd);
 
     const fieldRegex = new RegExp(`^\\s*${field}\\s*=`, 'i');
     let existingFieldLine = -1;
@@ -918,7 +919,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     const edit = new vscode.WorkspaceEdit();
-    const fieldLine = `${indent}${field} = ${formatFieldValue(value)},`;
+    const fieldLine = this.formatAlignedFieldLine(indent, field, value, eqCol);
 
     if (existingFieldLine >= 0) {
       const existingFieldEndLine = this.findExistingFieldEndLine(lines, existingFieldLine, entryEnd);
@@ -972,7 +973,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     // Find a safe insertion point
     const insertLine = findEntryInsertionPoint(lines, this.currentEntry, editor.selection.active.line);
 
-    const bibtex = formatBibtex(entry);
+    const bibtex = formatBibtex(entry, detectFileUsesAlignment(lines));
     const edit = new vscode.WorkspaceEdit();
 
     // Determine if blank lines are needed
@@ -1011,6 +1012,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const entryEnd = this.currentEntry.endLine - 1;
 
     const indent = this.detectFieldIndentation(lines, entryStart, entryEnd);
+    const eqCol = this.detectEqualsAlignment(lines, entryStart, entryEnd);
 
     const fieldRegex = new RegExp(`^\\s*${field}\\s*=`, 'i');
     let existingFieldLine = -1;
@@ -1023,7 +1025,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     const edit = new vscode.WorkspaceEdit();
-    const fieldLine = `${indent}${field} = ${formatFieldValue(value)},`;
+    const fieldLine = this.formatAlignedFieldLine(indent, field, value, eqCol);
 
     if (existingFieldLine >= 0) {
       const existingFieldEndLine = this.findExistingFieldEndLine(lines, existingFieldLine, entryEnd);
@@ -1093,7 +1095,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const lines = content.split('\n');
 
     const insertLine = findEntryInsertionPoint(lines, this.currentEntry, editor.selection.active.line);
-    const bibtex = formatBibtex(synthetic);
+    const bibtex = formatBibtex(synthetic, detectFileUsesAlignment(lines));
     const edit = new vscode.WorkspaceEdit();
 
     const { needsBlankBefore, needsBlankAfter } = determineBlankLines(lines, insertLine);
@@ -1121,7 +1123,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
   private findExistingFieldEndLine(lines: string[], fieldStart: number, entryEnd: number): number {
     for (let i = fieldStart + 1; i <= entryEnd; i++) {
-      if (/^\s*\w+\s*=/.test(lines[i])) {
+      if (/^\s*[^\s=,]+\s*=/.test(lines[i])) {
         return i - 1;
       }
     }
@@ -1131,12 +1133,39 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private detectFieldIndentation(lines: string[], entryStart: number, entryEnd: number): string {
     // Look for existing field lines to detect indentation
     for (let i = entryStart + 1; i <= entryEnd; i++) {
-      const match = lines[i].match(/^(\s*)\w+\s*=/);
+      const match = lines[i].match(/^(\s*)[^\s=,]+\s*=/);
       if (match) {
         return match[1]; // Return the whitespace prefix
       }
     }
     return '  '; // Default to 2 spaces
+  }
+
+  // Returns the column index of `=` if all field lines align their `=` at the same column
+  // (with at least one field having extra padding), otherwise null.
+  private detectEqualsAlignment(lines: string[], entryStart: number, entryEnd: number): number | null {
+    const eqPositions: number[] = [];
+    let hasExtraPadding = false;
+
+    for (let i = entryStart + 1; i <= entryEnd; i++) {
+      const match = lines[i].match(/^(\s*)([^\s=,]+)(\s+)=/);
+      if (!match) continue;
+      const eqPos = match[1].length + match[2].length + match[3].length;
+      eqPositions.push(eqPos);
+      if (match[3].length > 1) hasExtraPadding = true;
+    }
+
+    if (eqPositions.length < 2 || !hasExtraPadding) return null;
+    const first = eqPositions[0];
+    return eqPositions.every(p => p === first) ? first : null;
+  }
+
+  private formatAlignedFieldLine(indent: string, field: string, value: string, eqCol: number | null): string {
+    const formatted = formatFieldValue(value);
+    if (eqCol === null) return `${indent}${field} = ${formatted},`;
+    const keyEnd = indent.length + field.length;
+    const padding = eqCol > keyEnd + 1 ? ' '.repeat(eqCol - keyEnd) : ' ';
+    return `${indent}${field}${padding}= ${formatted},`;
   }
 
   private findInsertionPoint(
@@ -1152,7 +1181,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     let lastFieldLine = -1;
 
     for (let i = entryStart + 1; i <= entryEnd; i++) {
-      const match = lines[i].match(/^\s*(\w+)\s*=/);
+      const match = lines[i].match(/^\s*([^\s=,]+)\s*=/);
       if (match) {
         lastFieldLine = i;
         const fieldName = match[1].toLowerCase();

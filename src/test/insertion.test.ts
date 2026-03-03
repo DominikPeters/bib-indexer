@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { findEntryInsertionPoint, formatBibtex, determineBlankLines } from '../insertion';
+import { findEntryInsertionPoint, formatBibtex, determineBlankLines, detectFileUsesAlignment } from '../insertion';
 import { IndexedEntry } from '../types';
 
 suite('Entry Insertion Test Suite', () => {
@@ -341,6 +341,121 @@ suite('Entry Insertion Test Suite', () => {
       const result = formatBibtex(entry);
 
       assert.strictEqual(result, '@misc{empty,\n}');
+    });
+
+    test('aligned=true should align = signs to the longest field name', () => {
+      const entry: IndexedEntry = {
+        key: 'turing1950',
+        entryType: 'article',
+        file: '/test/file.bib',
+        startLine: 1,
+        endLine: 7,
+        fields: {
+          author: 'Turing, Alan M.',
+          title: 'Computing Machinery and Intelligence',
+          journal: 'Mind',
+          year: '1950',
+          volume: '59',
+        },
+        creators: {},
+        titleFilter: '',
+        titleCluster: '',
+        authorNorm: '',
+      };
+
+      const result = formatBibtex(entry, true);
+      const lines = result.split('\n').slice(1, -1); // field lines only
+
+      // 'journal' is the longest field (7 chars); eqCol = 2 + 7 + 1 = 10
+      for (const line of lines) {
+        const eqIdx = line.indexOf('=');
+        assert.strictEqual(eqIdx, 10, `= should be at column 10 in: "${line}"`);
+      }
+    });
+
+    test('aligned=true falls back to single space when key exceeds alignment column', () => {
+      const entry: IndexedEntry = {
+        key: 'test',
+        entryType: 'misc',
+        file: '/test/file.bib',
+        startLine: 1,
+        endLine: 3,
+        fields: {
+          doi: '10.1/x',
+          howpublished: 'Online',
+        },
+        creators: {},
+        titleFilter: '',
+        titleCluster: '',
+        authorNorm: '',
+      };
+
+      const result = formatBibtex(entry, true);
+      // 'howpublished' is longest (12 chars); eqCol = 2+12+1=15
+      // 'doi' (3 chars): keyEnd=5, eqCol=15 → pads to 15
+      // 'howpublished': keyEnd=14, eqCol=15 → single space (eqCol == keyEnd+1)
+      assert.ok(result.includes('howpublished = {Online},'), `Longest key should have single space: ${result}`);
+      const doiLine = result.split('\n').find(l => l.includes('doi'));
+      assert.ok(doiLine);
+      assert.strictEqual(doiLine!.indexOf('='), 15, `doi = should be at column 15`);
+    });
+  });
+
+  suite('detectFileUsesAlignment', () => {
+    test('returns true for a file with aligned entries', () => {
+      const lines = [
+        '@article{a,',
+        '  author  = {A},',
+        '  title   = {B},',
+        '  journal = {C},',
+        '  year    = {2020},',
+        '}',
+      ];
+      assert.strictEqual(detectFileUsesAlignment(lines), true);
+    });
+
+    test('returns false for a file with no alignment', () => {
+      const lines = [
+        '@article{a,',
+        '  author = {A},',
+        '  title = {B},',
+        '  journal = {C},',
+        '  year = {2020},',
+        '}',
+      ];
+      assert.strictEqual(detectFileUsesAlignment(lines), false);
+    });
+
+    test('returns false for an empty file', () => {
+      assert.strictEqual(detectFileUsesAlignment([]), false);
+    });
+
+    test('ignores @string and @preamble blocks when detecting alignment', () => {
+      const lines = [
+        '@string{jnl = "Journal"}',
+        '@preamble{"prefix"}',
+        '@article{a,',
+        '  author  = {A},',
+        '  title   = {B},',
+        '  journal = {C},',
+        '}',
+        '@article{b,',
+        '  author  = {D},',
+        '  title   = {E},',
+        '  journal = {F},',
+        '}',
+      ];
+      assert.strictEqual(detectFileUsesAlignment(lines), true);
+    });
+
+    test('supports hyphenated field names when detecting alignment', () => {
+      const lines = [
+        '@article{a,',
+        '  bdsk-url-1  = {https://example.com/a},',
+        '  year        = {2020},',
+        '}',
+      ];
+      assert.strictEqual(detectFileUsesAlignment(lines), true);
     });
   });
 

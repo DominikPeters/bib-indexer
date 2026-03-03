@@ -102,9 +102,10 @@ function findEntryRanges(lines: string[]): Array<{ start: number; end: number }>
  * Fields are sorted according to CANONICAL_FIELD_ORDER.
  *
  * @param entry - The entry to format
+ * @param aligned - If true, pad field names so all `=` signs align at the same column
  * @returns The formatted BibTeX string
  */
-export function formatBibtex(entry: IndexedEntry): string {
+export function formatBibtex(entry: IndexedEntry, aligned = false): string {
   const lines: string[] = [];
   lines.push(`@${entry.entryType}{${entry.key},`);
 
@@ -116,12 +117,101 @@ export function formatBibtex(entry: IndexedEntry): string {
     return aOrder - bOrder;
   });
 
+  const indent = '  ';
+  const eqCol = aligned && sortedFields.length > 0
+    ? indent.length + Math.max(...sortedFields.map(([k]) => k.length)) + 1
+    : null;
+
   for (const [key, value] of sortedFields) {
-    lines.push(`  ${key} = ${formatFieldValue(value)},`);
+    if (eqCol !== null) {
+      const keyEnd = indent.length + key.length;
+      const padding = eqCol > keyEnd + 1 ? ' '.repeat(eqCol - keyEnd) : ' ';
+      lines.push(`${indent}${key}${padding}= ${formatFieldValue(value)},`);
+    } else {
+      lines.push(`${indent}${key} = ${formatFieldValue(value)},`);
+    }
   }
 
   lines.push('}');
   return lines.join('\n');
+}
+
+/**
+ * Returns true if the file's existing entries appear to use aligned `=` signs.
+ *
+ * Checks up to 10 entries (for performance on large files). An entry is
+ * considered aligned when all its field lines have `=` at the same column
+ * and at least one field has extra padding before `=`. Column consistency
+ * is the key signal — it correctly rejects styles like "always two spaces
+ * before =" where columns vary by field name length.
+ *
+ * Returns true if at least half of the sampled entries are aligned.
+ */
+export function detectFileUsesAlignment(lines: string[]): boolean {
+  const MAX_ENTRIES = 10;
+  const NON_BIB_BLOCK_TYPES = new Set(['string', 'preamble', 'comment']);
+  let entriesChecked = 0;
+  let alignedEntries = 0;
+  let i = 0;
+
+  while (i < lines.length && entriesChecked < MAX_ENTRIES) {
+    const entryHeaderMatch = lines[i].match(/^\s*@([a-z]+)\s*\{/i);
+    if (!entryHeaderMatch) {
+      i++;
+      continue;
+    }
+    const blockType = entryHeaderMatch[1].toLowerCase();
+
+    // Find the closing brace of this entry
+    let braceDepth = 0;
+    const entryStart = i;
+    let entryEnd = i;
+    for (let j = i; j < lines.length; j++) {
+      for (const ch of lines[j]) {
+        if (ch === '{') {
+          braceDepth++;
+        } else if (ch === '}') {
+          braceDepth--;
+        }
+      }
+      if (braceDepth <= 0) {
+        entryEnd = j;
+        break;
+      }
+    }
+
+    // Skip @string/@preamble/@comment blocks for style sampling.
+    if (NON_BIB_BLOCK_TYPES.has(blockType)) {
+      i = entryEnd + 1;
+      continue;
+    }
+
+    // Check whether all field = signs land on the same column within this entry
+    const positions: number[] = [];
+    let hasExtraPadding = false;
+    for (let j = entryStart + 1; j <= entryEnd; j++) {
+      const match = lines[j].match(/^(\s*)([^\s=,]+)(\s+)=/);
+      if (!match) {
+        continue;
+      }
+      positions.push(match[1].length + match[2].length + match[3].length);
+      if (match[3].length > 1) {
+        hasExtraPadding = true;
+      }
+    }
+
+    if (positions.length >= 2 && hasExtraPadding) {
+      const first = positions[0];
+      if (positions.every(p => p === first)) {
+        alignedEntries++;
+      }
+    }
+
+    entriesChecked++;
+    i = entryEnd + 1;
+  }
+
+  return alignedEntries > 0 && alignedEntries * 2 >= entriesChecked;
 }
 
 /**

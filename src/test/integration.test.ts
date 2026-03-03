@@ -516,6 +516,168 @@ suite('Integration: Field and entry insertion', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  test('should align = when inserting into an aligned entry', async () => {
+    const tempDir = createTempDir();
+    const targetPath = writeBibFile(tempDir, 'target-aligned.bib', `@article{turing1950computing,
+  author  = {Turing, Alan M.},
+  title   = {Computing Machinery and Intelligence},
+  journal = {Mind},
+  year    = {1950},
+}`);
+    const sourcePath = writeBibFile(tempDir, 'source-aligned.bib', `@article{turing1950computing,
+  author  = {Turing, Alan M.},
+  title   = {Computing Machinery and Intelligence},
+  journal = {Mind},
+  year    = {1950},
+  volume  = {59},
+  doi     = {10.1093/mind/LIX.236.433},
+}`);
+
+    await indexManager.addFile(sourcePath);
+    const doc = await vscode.workspace.openTextDocument(targetPath);
+    const editor = await vscode.window.showTextDocument(doc);
+    setCursor(editor, 2);
+    sidebarProvider.onCursorMoved(editor);
+
+    await sidebarProvider.handleInsertField(sourcePath, 'turing1950computing', 'volume');
+
+    const text = editor.document.getText();
+    const volumeLine = text.split('\n').find(l => /\bvolume\b/.test(l));
+    assert.ok(volumeLine, 'volume line should exist');
+    // The = should be at column 10 (2 indent + 8 = col 10) to match existing alignment
+    const eqIndex = volumeLine!.indexOf('=');
+    assert.strictEqual(eqIndex, 10, `= should be at column 10, got: "${volumeLine}"`);
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test('should not align = when entry does not use alignment', async () => {
+    const tempDir = createTempDir();
+    const targetPath = writeBibFile(tempDir, 'target-noalign.bib', `@article{turing1950computing,
+  author = {Turing, Alan M.},
+  title = {Computing Machinery and Intelligence},
+  journal = {Mind},
+  year = {1950},
+}`);
+    const sourcePath = writeBibFile(tempDir, 'source-noalign.bib', `@article{turing1950computing,
+  author = {Turing, Alan M.},
+  title = {Computing Machinery and Intelligence},
+  journal = {Mind},
+  year = {1950},
+  volume = {59},
+}`);
+
+    await indexManager.addFile(sourcePath);
+    const doc = await vscode.workspace.openTextDocument(targetPath);
+    const editor = await vscode.window.showTextDocument(doc);
+    setCursor(editor, 2);
+    sidebarProvider.onCursorMoved(editor);
+
+    await sidebarProvider.handleInsertField(sourcePath, 'turing1950computing', 'volume');
+
+    const text = editor.document.getText();
+    const volumeLine = text.split('\n').find(l => /\bvolume\b/.test(l));
+    assert.ok(volumeLine, 'volume line should exist');
+    assert.ok(volumeLine!.includes('volume = {59}'), `Should use plain spacing, got: "${volumeLine}"`);
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test('should not pad beyond key length when key is too long for alignment column', async () => {
+    const tempDir = createTempDir();
+    const targetPath = writeBibFile(tempDir, 'target-longkey.bib', `@article{test,
+  author  = {A},
+  title   = {B},
+  journal = {C},
+  year    = {2020},
+}`);
+    const sourcePath = writeBibFile(tempDir, 'source-longkey.bib', `@article{test,
+  author  = {A},
+  title   = {B},
+  journal = {C},
+  year    = {2020},
+  howpublished = {D},
+}`);
+
+    await indexManager.addFile(sourcePath);
+    const doc = await vscode.workspace.openTextDocument(targetPath);
+    const editor = await vscode.window.showTextDocument(doc);
+    setCursor(editor, 2);
+    sidebarProvider.onCursorMoved(editor);
+
+    await sidebarProvider.handleInsertField(sourcePath, 'test', 'howpublished');
+
+    const text = editor.document.getText();
+    const line = text.split('\n').find(l => /\bhowpublished\b/.test(l));
+    assert.ok(line, 'howpublished line should exist');
+    // howpublished (12 chars) + indent (2) = 14, which exceeds alignment col 10, so single space
+    assert.ok(line!.includes('howpublished = {D}'), `Should fall back to single space, got: "${line}"`);
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test('should keep aligned entry formatting when file starts with @string and @preamble', async () => {
+    const tempDir = createTempDir();
+    const targetPath = writeBibFile(tempDir, 'target-string-preamble.bib', `@string{jnl = "Mind"}
+@preamble{"prefix"}
+
+@article{turing1950computing,
+  author  = {Turing, Alan M.},
+  title   = {Computing Machinery and Intelligence},
+  journal = {Mind},
+  year    = {1950},
+}`);
+    const sourcePath = writeBibFile(tempDir, 'source-string-preamble.bib', `@article{nash1950equilibrium,
+  author = {Nash, John},
+  title = {Equilibrium Points in N-person Games},
+  year = {1950},
+}`);
+
+    await indexManager.addFile(sourcePath);
+    const doc = await vscode.workspace.openTextDocument(targetPath);
+    const editor = await vscode.window.showTextDocument(doc);
+    setCursor(editor, 4);
+    sidebarProvider.onCursorMoved(editor);
+
+    await sidebarProvider.handleInsertEntry(sourcePath, 'nash1950equilibrium');
+
+    const text = editor.document.getText();
+    assert.ok(text.includes('@article{nash1950equilibrium,'), 'Inserted entry should exist');
+    assert.ok(text.includes('  title  = {Equilibrium Points in N-person Games},'), 'Inserted entry should use aligned spacing');
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test('should align = when entry uses hyphenated aligned field names', async () => {
+    const tempDir = createTempDir();
+    const targetPath = writeBibFile(tempDir, 'target-hyphen-aligned.bib', `@article{test,
+  bdsk-url-1  = {https://example.com},
+  date-added  = {2020-01-01},
+  year        = {2020},
+}`);
+    const sourcePath = writeBibFile(tempDir, 'source-hyphen-aligned.bib', `@article{test,
+  bdsk-url-1  = {https://example.com},
+  date-added  = {2020-01-01},
+  year        = {2020},
+  volume      = {59},
+}`);
+
+    await indexManager.addFile(sourcePath);
+    const doc = await vscode.workspace.openTextDocument(targetPath);
+    const editor = await vscode.window.showTextDocument(doc);
+    setCursor(editor, 2);
+    sidebarProvider.onCursorMoved(editor);
+
+    await sidebarProvider.handleInsertField(sourcePath, 'test', 'volume');
+
+    const text = editor.document.getText();
+    const volumeLine = text.split('\n').find(l => /\bvolume\b/.test(l));
+    assert.ok(volumeLine, 'volume line should exist');
+    assert.strictEqual(volumeLine!.indexOf('='), 14, `= should be at column 14, got: "${volumeLine}"`);
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
   test('should replace multiline field when it is the last field before closing brace', async () => {
     const tempDir = createTempDir();
     const targetPath = writeBibFile(tempDir, 'target-last.bib', `@article{multilineLast,
