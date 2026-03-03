@@ -2,7 +2,7 @@
   "name": "bib-indexer",
   "displayName": "Bib Indexer",
   "description": "Search through all your bib files",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "publisher": "DominikPeters",
   "license": "MIT",
   "homepage": "https://github.com/DominikPeters/bib-indexer",
