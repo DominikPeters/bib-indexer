@@ -1,7 +1,7 @@
 {
   "name": "bib-indexer",
   "displayName": "Bib Indexer",
-  "description": "Bibliography manager for researchers with separate bib files per paper",
+  "description": "Search through all your bib files",
   "version": "0.1.0",
   "publisher": "DominikPeters",
   "license": "MIT",
@@ -13,6 +13,7 @@
   "engines": {
     "vscode": "^1.108.0"
   },
+  "icon": "images/logo.png",
   "categories": [
     "Other"
   ],
@@ -49,7 +50,7 @@
         {
           "id": "bibIndexer",
           "title": "Bib Indexer",
-          "icon": "$(references)",
+          "icon": "$(book)",
           "tooltip": "Bib Indexer"
         }
       ]
