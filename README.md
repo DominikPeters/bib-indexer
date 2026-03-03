@@ -4,7 +4,7 @@ A VS Code sidebar extension for researchers who maintain separate `.bib` bibtex 
 
 Example: You are editing a bibtex entry for a paper, but it is missing page numbers. Some other bib file on your hard drive has a more complete entry for the same paper. Bib Indexer detects this and shows you the more complete entry in the sidebar. You can then click a button to copy the missing page numbers into your current entry.
 
-![Bib Indexer sidebar overview](images/overview.png)
+![bib-recording2](https://github.com/user-attachments/assets/63a68345-4db1-4299-80f8-50fdc4826e38)
 
 ## Features
 
@@ -12,13 +12,11 @@ Example: You are editing a bibtex entry for a paper, but it is missing page numb
 
 Full-text search across every indexed `.bib` file. Supports quoted phrases for exact matching and multi-term queries. Results are ranked by relevance and grouped by paper identity, so different versions of the same entry appear together.
 
-![Search results](images/search.png)
+![bib-recording3](https://github.com/user-attachments/assets/ce186e35-ba34-4907-a792-bc3ffa793e15)
 
 ### Automatic duplicate detection
 
 When your cursor is on a BibTeX entry, the sidebar shows matching entries from other files. Matches are found via DOI (exact match) or fuzzy title + author similarity.
-
-![Duplicate matches](images/matches.png)
 
 ### Field-level comparison
 
@@ -28,7 +26,7 @@ Each match card highlights the differences between your current entry and the ma
 - **Different values** — an inline diff shows what changed, with additions highlighted.
 - **Identical fields** — shown plainly for reference.
 
-![Field comparison](images/field-diff.png)
+<img width="791" height="377" alt="Screenshot 2026-03-03 at 13 27 10" src="https://github.com/user-attachments/assets/2a6088c9-9150-465e-9d62-1eb1ac1eea08" />
 
 ### Smart merging
 
@@ -46,7 +44,7 @@ Two entries are compatible when they share the same BibTeX type and all overlapp
 
 Add folders or individual `.bib` files to the index from the sidebar. The extension watches for changes and reindexes incrementally — only modified files are re-parsed. 
 
-![File management view](images/file-management.png)
+<img width="309" height="260" alt="Screenshot 2026-03-03 at 13 26 52" src="https://github.com/user-attachments/assets/865c2a10-e2d0-44e0-b074-34202a4e1684" />
 
 ## Getting started
 
